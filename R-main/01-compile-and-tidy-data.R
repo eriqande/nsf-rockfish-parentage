@@ -58,3 +58,18 @@ sample_sheets <- lapply(1:nrow(fdf), function(i) {
   bind_rows()
 
 saveRDS(sample_sheets, "data/sample-sheet-tibble.rds", compress = "xz")
+
+
+
+#### And finally, let's get the meta-data read in and cleaned up (if it needs it) ####
+meta <- read_excel("data/nsf-rockfish-metadata.xlsx", sheet = 1)
+
+# when we read that in, we lose the "None."s in the LEFTOVER_SAMPLE fields.  That 
+# is OK for now.  
+names(meta) <- str_replace(names(meta), "^Marine::", "marine_")  # get the colons out of the column names
+
+saveRDS(meta, "data/meta-data-tibble.rds", compress = "xz")
+
+
+
+
