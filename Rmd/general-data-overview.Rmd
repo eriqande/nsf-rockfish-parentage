@@ -14,8 +14,8 @@ To start off with, let's load data and libs:
 library(tidyverse)
 
 genos <- readRDS("../extdata/processed/called_genos_na_explicit.rds")
-samples <- readRDS("../data/sample-sheet-tibble.rds")
-meta <- readRDS("../data/meta-data-tibble.rds")
+samples <- readRDS("../data/processed/sample-sheet-tibble.rds")
+meta <- readRDS("../data/processed/meta-data-tibble.rds")
 ```
 
 ## Whom have we not genotyped?
@@ -32,7 +32,8 @@ not_geno %>%
   arrange(desc(n))
 ```
 That looks very right.  The total number of individuals in the meta data that were
-not genotyped is `r nrow(not_geno)`, and they are all in "non-target" species.
+not genotyped is `r nrow(not_geno)`, and they are all in "non-target" species, or were
+some of the extruded larvae that were not genotyped.  
 
 ## Whom _have_ we genotyped?
 
@@ -48,8 +49,8 @@ tried %>%
 ```
 OK, that looks right-ish.  That is `r nrow(tried)` NMFS_DNA_IDs that were put on the sequencer.  
 
-## Who is missing from the metadata file?
-That seems a bit low.  It appears that the meta-data is missing some NMFS_DNA_IDs.  Here are all the 
+## Is anyone missing from the metadata file?
+Here are all the 
 NMFS_DNA_IDs that appear in the sample_sheets but do not appear in the metadata: (or at least were not
 read correctly out of the metadata file.)
 ```{r missing-from-meta}
@@ -57,6 +58,16 @@ missing_from_meta <- samples %>%
   filter(!(NMFS_DNA_ID %in% meta$NMFS_DNA_ID))
 missing_from_meta
 ```
-There are `r nrow(missing_from_meta)` of those, and I have confirmed that they don't appear in the meta data.  My guess is that
-they are in the repository, but not listed as part of the rockfish project, so they did not get exported.
+There are `r nrow(missing_from_meta)` of those.  Here is a breakdown of them:
+```{r break-it-down}
+missing_from_meta %>%
+  group_by(gtseq_run) %>% 
+  tally()
+```
+So, I don't know what is wrong with that single individual on GTSeq Run 47, but I am not
+going to worry about him for now.  The 65 individuals from 
+Run 54 are from Hailey's Species ID project (they were filling out a MiSeq lane), so it is correct
+that we have no meta data for them.
+
+
 
