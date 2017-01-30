@@ -70,4 +70,30 @@ Run 54 are from Hailey's Species ID project (they were filling out a MiSeq lane)
 that we have no meta data for them.
 
 
+## What are the general levels of genotyping success?
 
+Over all the gtseq_run x id combos we want to count up the number of successfully typed loci.  No missing
+data is 96 and it goes down from there.  
+```{r count-succ-genos}
+genos %>%
+  filter(NMFS_DNA_ID %in% meta$NMFS_DNA_ID) %>%
+  group_by(gtseq_run, id) %>% 
+  summarise(num_called = sum(!is.na(allele)) / 2) %>%
+  group_by(num_called) %>%
+  tally() %>%
+  arrange(desc(num_called))
+```
+
+And if we look at that over NMFS_DNA_IDs we find almost no individuals that have been properly regenotyped.  
+This isn't good.  We need those regenotyped individuals to investigate genotyping error rates.
+```{r count-succ-by-nmfs-id}
+genos %>%
+  filter(NMFS_DNA_ID %in% meta$NMFS_DNA_ID) %>%
+  group_by(NMFS_DNA_ID) %>% 
+  summarise(num_called = sum(!is.na(allele)) / 2) %>%
+  group_by(num_called) %>%
+  tally() %>%
+  arrange(desc(num_called))
+```
+This is showing us that we don't have any individuals (NMFS_DNA_IDs) that were successfully genotyped twice
+at all 96 loci.  What is up with that?  Surely we did some re-runs to assess concordance.  Where are they?  
