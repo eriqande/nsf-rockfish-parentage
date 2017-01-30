@@ -1,6 +1,7 @@
 library(tidyverse)
 library(readxl)
 library(stringr)
+library(lubridate)
 
 
 source("R/rockfish-funcs.R")
@@ -58,18 +59,35 @@ sample_sheets <- lapply(1:nrow(fdf), function(i) {
 }) %>%
   bind_rows()
 
-saveRDS(sample_sheets, "data/sample-sheet-tibble.rds", compress = "xz")
+saveRDS(sample_sheets, "data/processed/sample-sheet-tibble.rds", compress = "xz")
 
 
 
 #### And finally, let's get the meta-data read in and cleaned up (if it needs it) ####
-meta <- read_excel("data/nsf-rockfish-metadata.xlsx", sheet = 1)
+meta1 <- read_csv("data/nsf-rockfish-metadata.csv") %>%
+  select(-`Marine::NMFS_DNA_ID`) %>%
+  mutate(BATCH_ID = as.character(BATCH_ID),
+         WEIGHT = as.numeric(WEIGHT)) # get rid of the duplicated ID column
 
 # when we read that in, we lose the "None."s in the LEFTOVER_SAMPLE fields.  That 
 # is OK for now.  
-names(meta) <- str_replace(names(meta), "^Marine::", "marine_")  # get the colons out of the column names
 
-saveRDS(meta, "data/meta-data-tibble.rds", compress = "xz")
+# that was the majority of the meta data, but there are two other sources,
+# as we have some old SMURF data (plus a few other rockfish that are in that
+# metadata set) and also fish from the multiple-paternity study with Sue Sogard,
+# so we are going to get those meta data and bind them on there as well.
+more_meta <- read_delim("data/more-rockfish-metadata.txt", delim = "\t") %>%
+  select(-HATCHERY_MARK, -LANDFALL_PORT, -CRUISE, -HAUL)  %>%  # blow away a few of these columns that we don't need 
+                                                          # so that the columns are congruent with meta
+  select(-NMFS_DNA_ID_1)  # remove that duplicated ID column here too
+
+names(meta1) <- str_replace(names(meta1), "^Marine::", "")  # get the "Marine::" out of some of the column names
+
+meta <- bind_rows(meta1, more_meta) %>%
+  mutate(COLLECTION_DATE = mdy(COLLECTION_DATE),
+         PICK_DATE = mdy(PICK_DATE))
+
+saveRDS(meta, "data/processed/meta-data-tibble.rds", compress = "xz")
 
 
 
