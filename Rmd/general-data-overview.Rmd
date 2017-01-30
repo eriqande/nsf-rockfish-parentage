@@ -1,0 +1,62 @@
+---
+title: "General Overview of Rockfish Data"
+output: 
+  html_notebook:
+    toc: true
+---
+
+
+This document explores the data and meta-data we have to make sure that everything
+is looking like it should, and to do a few summaries.
+
+To start off with, let's load data and libs:
+```{r load-stuff}
+library(tidyverse)
+
+genos <- readRDS("../extdata/processed/called_genos_na_explicit.rds")
+samples <- readRDS("../data/sample-sheet-tibble.rds")
+meta <- readRDS("../data/meta-data-tibble.rds")
+```
+
+## Whom have we not genotyped?
+
+Let us start off by seeing whom in the meta data was not genotyped:
+```{r not-genoed}
+not_geno <- meta %>%
+  filter(!(NMFS_DNA_ID %in% samples$NMFS_DNA_ID))
+
+# summarize by species and reported life stage:
+not_geno %>% 
+  group_by(GENUS, SPECIES, REPORTED_LIFE_STAGE) %>%
+  tally() %>% 
+  arrange(desc(n))
+```
+That looks very right.  The total number of individuals in the meta data that were
+not genotyped is `r nrow(not_geno)`, and they are all in "non-target" species.
+
+## Whom _have_ we genotyped?
+
+Same game with the ones that we have genotyped (or at least tried to genotype)
+```{r yes-geno}
+tried <- meta %>%
+  filter(NMFS_DNA_ID %in% samples$NMFS_DNA_ID) 
+
+tried %>%
+  group_by(GENUS, SPECIES, REPORTED_LIFE_STAGE) %>%
+  tally() %>% 
+  arrange(desc(n))
+```
+OK, that looks right-ish.  That is `r nrow(tried)` NMFS_DNA_IDs that were put on the sequencer.  
+
+## Who is missing from the metadata file?
+That seems a bit low.  It appears that the meta-data is missing some NMFS_DNA_IDs.  Here are all the 
+NMFS_DNA_IDs that appear in the sample_sheets but do not appear in the metadata: (or at least were not
+read correctly out of the metadata file.)
+```{r missing-from-meta}
+missing_from_meta <- samples %>%
+  filter(!(NMFS_DNA_ID %in% meta$NMFS_DNA_ID))
+missing_from_meta
+```
+There are `r nrow(missing_from_meta)` of those, and I have confirmed that they don't appear in the meta data.  My guess is that
+they are in the repository, but not listed as part of the rockfish project, so they did not get exported.
+
