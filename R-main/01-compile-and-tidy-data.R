@@ -50,6 +50,7 @@ dir <- "data/sample_sheets"
 sample_sheets <- lapply(1:nrow(fdf), function(i) {
   message("Working on ", fdf$file[i])
   read_excel(path = file.path(dir, fdf$file[i]), sheet = "sample_sheet", skip = 18) %>%
+    filter(!is.na(Sample_Plate)) %>%  # read_excel sometimes reads a lot of blank lines...
     tidyr::separate(Sample_Plate, into = c("NMFS_DNA_ID", "ssBOX_ID", "ssBOX_POSITION")) %>%
     mutate(id = str_replace(Sample_ID, "satrovirens_0*", "s")) %>%
     mutate(gtseq_run = fdf$gtseq_run[i]) %>%
@@ -73,3 +74,21 @@ saveRDS(meta, "data/meta-data-tibble.rds", compress = "xz")
 
 
 
+#### In the end, let us get a data frame that includes genotypes for all the indidividuals  ####
+# and which explicity has NAs in places where data are missing, and also 
+# has the NMFS_DNA_ID on there
+genos_long_explicit_NAs <- sample_sheets %>%
+  select(gtseq_run, id, NMFS_DNA_ID) %>%
+  unite(col = gid, sep = "_", gtseq_run, id, NMFS_DNA_ID) %>%
+  select(gid) %>%
+  unlist() %>%
+  unname() %>%
+  expand.grid(gid = ., locus = unique(genos_long$locus), gene_copy = 1:2, stringsAsFactors = FALSE) %>%
+  tbl_df() %>%
+  separate(gid, into = c("gtseq_run", "id", "NMFS_DNA_ID"), convert = TRUE) %>%
+  left_join(., genos_long) %>%
+  arrange(gtseq_run, id, locus, gene_copy)
+
+# and then save that
+saveRDS(genos_long_explicit_NAs, file = "extdata/processed/called_genos_na_explicit.rds", compress = "xz")
+  
