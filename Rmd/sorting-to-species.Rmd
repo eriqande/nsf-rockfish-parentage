@@ -84,10 +84,10 @@ we will run through structure to identify to species.
 
 
 
-## Making a structure data set
+## Making a GSI data set
 
-We are going to do this by turning alleles into integers and spreading it.  After that we will add 
-population identifer integers saying which species think they are.
+We are going to do this by turning alleles into integers and spreading it and then using 
+gsi_sim.
 ```{r spread-genos}
 # first make integers of the alleles
 alle_idxs <- no_hi_missers %>% 
@@ -101,56 +101,95 @@ alle_idxs <- no_hi_missers %>%
 genostrs <- alle_idxs %>% 
   group_by(NMFS_DNA_ID, locus) %>%
   summarise(genostr = paste(alleidx[1], alleidx[2], collapse = " ")) %>%
-  mutate(genostr = ifelse(genostr == "NA NA", "-9 -9", genostr))  # denote missing alleles with -9
+  mutate(genostr = ifelse(genostr == "NA NA", "0 0", genostr))  # denote missing alleles with 0
   
 # finally spread that and we have a data frame that is
 # close to final
-struct_frame <- genostrs %>%
+gsi_frame <- genostrs %>%
   tidyr::spread(data = ., key = locus, value = genostr)
   
 ```
 
 
-Once we have that, we just need to assign integers to the different groups:
+Once we have that, we just need to assign integers to figure out whom we are
+going to use.  I say we make a data set of all adults with appreciable numbers of individuals
+
 ```{r make-group-ints}
-tmp <- meta %>%
-  filter(NMFS_DNA_ID %in% keepers) %>%
-  mutate(group = paste(REPORTED_LIFE_STAGE, SPECIES)) 
+meta_keep <- meta %>%
+  filter(NMFS_DNA_ID %in% genostrs$NMFS_DNA_ID) %>%
+  group_by(REPORTED_LIFE_STAGE, SPECIES) 
 
-groups_list <- tmp %>%
-  group_by(group) %>%
-  tally() %>% 
-  arrange(desc(n)) %>%
-  mutate(groupidx = as.integer(factor(group, levels = groups_list$group)) )
+atro_groups <- meta_keep %>%
+  tally() %>%
+  filter(n>=20,
+         REPORTED_LIFE_STAGE == "ADULT" | str_detect(SPECIES, "atrovirens"))
 
-group_idx <- tmp %>%
-  mutate(groupidx = as.integer(factor(group, levels = groups_list$group)) ) %>%
-  select(NMFS_DNA_ID, groupidx)
+# see what that looks like
+atro_groups
+```
+That is `r sum(atro_groups$n)` that we will be working with.  Some of them will be kelp rockfish.  Cool.
+
+Let's pick them all out:
+```{r pick-out}
+atro_dults <- atro_groups %>% filter(REPORTED_LIFE_STAGE == "ADULT")
+atro_juvs <- atro_groups %>% filter(REPORTED_LIFE_STAGE == "JUVENILE")
+
+adult_ids <- meta_keep %>%
+  ungroup() %>%
+  filter(REPORTED_LIFE_STAGE == "ADULT" & SPECIES %in% atro_dults$SPECIES) %>%
+  mutate(group = SPECIES) %>%
+  select(NMFS_DNA_ID, group) %>%
+  arrange(group)
+
+juvie_ids <- meta_keep %>%
+  ungroup() %>%
+  filter(REPORTED_LIFE_STAGE == "JUVENILE" & SPECIES %in% atro_juvs$SPECIES) %>%
+  mutate(group = paste(REPORTED_LIFE_STAGE, SPECIES, sep = "_")) %>%
+  select(NMFS_DNA_ID, group) %>%
+  arrange(group)
 ```
 
-Here is what those group number mean:
-```{r show-groups}
-groups_list
+Now we just need to grab those individauls out of the gsi_frame and make some gsi_sim files:
+```{r make-adults-gsi}
+adult_genos <- left_join(adult_ids, gsi_frame)
+fishlist <- split(adult_genos %>% select(-group), adult_genos$group)
+cat(c(nrow(adult_genos), ncol(adult_genos) - 2), sep = " ", eol = "\n", file = "../gsi_area/adults.txt")
+cat(names(adult_genos[-(1:2)]), sep = "\n", file = "../gsi_area/adults.txt", append = TRUE)
+lapply(names(fishlist), function(n) {
+  y <- fishlist[[n]]
+  cat(c("POP", n), sep = " ", eol = "\n", file = "../gsi_area/adults.txt", append = TRUE)
+  write.table(y, row.names = F, col.names = F, quote = F, sep = "   ", file = "../gsi_area/adults.txt", append = TRUE)
+})
 ```
 
-Now we just bung that onto the structure data set and write it out
-```{r bung-it-sort}
-fstr <- struct_frame %>%
-  left_join(., group_idx) %>%
-  select(NMFS_DNA_ID, groupidx, everything()) %>%
-  arrange(groupidx, NMFS_DNA_ID)
-
-names(fstr)[1:2] <- ""
-
-write.table(fstr, col.names = TRUE, row.names = FALSE, sep = "   ", quote = FALSE, file = "../structure_area/rockfish.txt")
+And I do something similar for the juvies
+```{r make-juvies-gsi}
+juvie_genos <- left_join(juvie_ids, gsi_frame)
+fishlist <- split(juvie_genos %>% select(-group), juvie_genos$group)
+cat(c(nrow(juvie_genos), ncol(juvie_genos) - 2), sep = " ", eol = "\n", file = "../gsi_area/juvies.txt")
+cat(names(adult_genos[-(1:2)]), sep = "\n", file = "../gsi_area/juvies.txt", append = TRUE)
+cat(c("POP Mixture"), eol = "\n", file = "../gsi_area/juvies.txt", append = TRUE)
+lapply(names(fishlist), function(n) {
+  y <- fishlist[[n]]
+  write.table(y, row.names = F, col.names = F, quote = F, sep = "   ", file = "../gsi_area/juvies.txt", append = TRUE)
+})
 ```
 
-It turns out that was a huge waste of time, at least running at K=7 is totally silly. So, I am going to change
-direction here and just make a GSI baseline out of the Adults with reasonably high numbers and
-then do GSI on the juveniles that are thought to include atrovirens, so I can at least get the kelp
-rockfish.
-
-```{r go-for-gsi}
-group_idx
+Then run gsi_sim on the command line.  This is set to not eval by default
+```{sh run-gsi-sim, eval=FALSE}
+cd gsi_area; 
+/Users/eriq/Documents/git-repos/gsi_sim/gsi_sim-Darwin -b adults.txt -t juvies.txt | awk -F";" 'BEGIN {print "NMFS_DNA_ID species score"} /GMA_FULL_EM_INDIVS_CSV:/ {print $1, $2, $3}' | sed 's/GMA_FULL_EM_INDIVS_CSV:\///g' > rockfish_assignments.txt
 ```
 
+```{r slurp-gsi, eval=FALSE}
+rock_ass <- read_delim("../gsi_area/rockfish_assignments.txt", delim = " ")
+saveRDS(rock_ass, file = "../data/processed/juvie-gsi-sim-assignments.rds", compress = "xz")
+```
+
+That has given us a nice little file that gives us the gsi-sim assignments, which should be good enough
+for us to get the kelp rockfish.  
+
+As a final hurrah, we will also save no-high-missers
+```{r save-no-hi}
+saveRDS(no_hi_missers, file = "../extdata/processed/genos-aggregated-and-no-hi-missers.rds", compress = "xz")
+```

@@ -4,3 +4,5 @@
 .Ruserdata
 extdata
 .DS_Store
+gsi_area/*
+Rmd/*.nb.html
