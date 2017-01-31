@@ -1,0 +1,74 @@
+---
+title: "Doing Parentage on the Kelp Rockfish"
+output: 
+  html_notebook:
+    toc: true
+---
+
+
+This is a first stab at winnowing down our samples to just a few species of rockfish,
+and figuring out which they are.  I am going to go for this with structure.
+
+
+To start off with, let's load data and libs:
+```{r load-stuff}
+library(tidyverse)
+library(CKMRsim)
+library(stringr)
+
+meta <- readRDS("../data/processed/meta-data-tibble.rds")
+genos <- readRDS("../extdata/processed/genos-aggregated-and-no-hi-missers.rds")
+species <- readRDS("../data/processed/juvie-gsi-sim-assignments.rds") 
+```
+
+
+## Selecting our fish and designating allele nomenclature
+
+We gotta pick out the _S. atrovirens_.  For adults that is pretty much already done, just by who they
+are, but we must use the GSI assignments for the juveniles.
+```{r define-kelps}
+kelp_ad <- meta %>% 
+  filter(SPECIES == "atrovirens",
+         REPORTED_LIFE_STAGE == "ADULT") %>%
+  select(NMFS_DNA_ID) %>% unlist() %>% unname()
+
+kelp_juv <- species %>%
+  filter(score > 99.9) %>%
+  select(NMFS_DNA_ID) %>% unlist() %>% unname
+
+```
+
+With those we can just filter down the genos to the ones that we want, and then we
+can get it into the format required for CKMR.
+```{r kelp-genos}
+kelp_genos <- genos %>%
+  filter(NMFS_DNA_ID %in% c(kelp_ad, kelp_juv))
+
+# we will use this some more
+kg2 <- kelp_genos %>% 
+  select(NMFS_DNA_ID, locus, allele) %>%
+  mutate(Chrom = "GTseq") %>% 
+  mutate(Pos = as.integer(factor(locus, levels = unique(locus)))) %>%
+  rename(Locus = locus,
+         Allele = allele) %>%
+  select(NMFS_DNA_ID, Chrom, Locus, Pos, Allele) %>%
+  ungroup()
+
+# get the allele freqs
+kg_ckmr_markers <- kg2 %>%
+  group_by(Chrom, Locus, Pos, Allele) %>%
+  summarise(counts = n()) %>%
+  group_by(Locus, Pos) %>%
+  mutate(Freq = counts / sum(counts)) %>%
+  select(-counts) %>%
+  mutate(AlleIdx = 1,
+         LocIdx = 1) %>%
+  reindex_markers(.)
+```
+Great! We have a total `r nrow(kg_ckmr_markers)` alleles in this data set.
+
+
+## Doing CKMR simulations to assess power
+
+Really simply let's just do this to see what our power for parentage ought to look like.
+
