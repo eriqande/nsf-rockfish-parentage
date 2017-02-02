@@ -56,6 +56,7 @@ kg2 <- kelp_genos %>%
 
 # get the allele freqs
 kg_ckmr_markers <- kg2 %>%
+  filter(!is.na(Allele)) %>% # it is vital to filter out the NAs at this stage
   group_by(Chrom, Locus, Pos, Allele) %>%
   summarise(counts = n()) %>%
   group_by(Locus, Pos) %>%
@@ -71,4 +72,184 @@ Great! We have a total `r nrow(kg_ckmr_markers)` alleles in this data set.
 ## Doing CKMR simulations to assess power
 
 Really simply let's just do this to see what our power for parentage ought to look like.
+```{r CKMR-create}
+CK <- create_ckmr(kg_ckmr_markers, kappa_matrix = kappas[c("PO", "FS", "U"), ])
+
+# see what it tells us when we print it:
+CK
+```
+
+Then do the simulations to see what the false positive rates are for finding parents when the truth
+is U or FS:
+```{r CKMR-sim-and-sample}
+Qs <- simulate_Qij(C = CK, froms = c("PO", "FS", "U"), tos = c("PO", "FS", "U"), reps = 10^4)
+
+# then do the importance sampling to get the FPRs
+mc_sample_simple(Qs, nu = "PO", de = c("U", "FS"), tr = c("U", "FS"), method = "both")
+```
+We can come back to that later to see about finding Full Sibs.
+
+## Making genotype matrices
+```{r}
+kelp_haps <- kelp_genos %>%
+  filter(!is.na(allele)) %>%  # once again, it is critical to remove these at this point
+  select(NMFS_DNA_ID, locus, gene_copy, allele) %>%
+  rename(Locus = locus, Allele = allele)
+
+kelp_idx_frame <- kg_ckmr_markers %>%
+  select(Locus, Allele, LocIdx, AlleIdx) %>%
+  group_by(Locus) %>%
+  mutate(NumA = n()) %>%  # get the number of alleles at each locus
+  ungroup() %>%
+  left_join(kelp_haps, .)  %>%  # join the alle_idx's onto the actual genotype data
+  select(NMFS_DNA_ID, Locus, gene_copy, LocIdx, NumA, AlleIdx) %>%
+  spread(key = gene_copy, value = AlleIdx) %>%
+  mutate(GenoIdx = index_ab(a = `1`, b = `2`, A = NumA))
+
+# make a matrix of genotype integers 
+wide_kelp <- kelp_idx_frame %>%
+  select(NMFS_DNA_ID, LocIdx, GenoIdx) %>%
+  spread(data = ., key = LocIdx, value = GenoIdx)
+```
+
+Don't forget to set NA's to 0, and then decrease each value by 1:
+```{r make-mat}
+rocky_mat <- as.matrix(wide_kelp[, -1])
+rownames(rocky_mat) <- wide_kelp$NMFS_DNA_ID
+rocky_mat[is.na(rocky_mat)] <- 0
+rocky_mat <- rocky_mat - 1
+storage.mode(rocky_mat) <-  "integer"
+```
+
+## Looking for duplicated samples
+
+We can quickly look through rocky_mat for pairs of indivs with lots of matching genotypes.
+```{r check-for-dupes}
+matchers <- pairwise_geno_id(S = rocky_mat, max_miss = 12) %>%
+  arrange(num_mismatch)
+matchers
+```
+We need to deal with these somehow.  I am going to say that anyone with 3 or fewer mismatches is certainly 
+the same individual, and we are going to take just one from amongst those pairs/groups.  We use a hasty method:
+we toss out all the individuals that appear in both ind1 and ind2, and then all the remaining ind2's.  This 
+might throw out one more than we need to, but it is what we do for now.
+```{r toss-matchers}
+def_same <- matchers %>%
+  filter(num_mismatch <= 3)
+
+toss_these <- c(intersect(def_same$ind1, def_same$ind2), def_same$ind2) %>%
+  unique()
+
+rocky_mat_tossed <- rocky_mat[-toss_these,]
+```
+
+Now we have to break that into two matrices: one for the adults and one for the kids.
+This should not be too hard.  We have to deal with the fact that not all of the adults in the meta data
+had few enough missing genotypes to be included.
+```{r break-stage}
+kelp_ad_kept <- kelp_ad[kelp_ad %in% rownames(rocky_mat_tossed)]
+kelp_juv_kept <- kelp_juv[kelp_juv %in% rownames(rocky_mat_tossed)]
+
+adult_mat <- rocky_mat_tossed[kelp_ad_kept, ]
+juvie_mat <- rocky_mat_tossed[kelp_juv_kept, ]
+```
+
+## Doing the comparisons
+
+We need to flatten the CKMR object appropriately
+```{r flatten}
+# flatten those out
+po_flat <- flatten_ckmr(CK, "PO")
+unrel_flat <- flatten_ckmr(CK, "U")
+
+# then compute the log-likelihoods for the parent offspring relationship
+po_logl_flat <- po_flat
+po_logl_flat$probs <- log(po_flat$probs / unrel_flat$probs)
+
+```
+
+
+Now we are ready to do these!
+```{r do-comps}
+idx <- 1:nrow(juvie_mat)
+names(idx) <- idx
+comps <- lapply(idx, function(i) {
+    tmp <- comp_ind_pairwise(S = adult_mat, T = juvie_mat, t = i, values = po_logl_flat$probs, nGenos = po_logl_flat$nGenos, Starts = po_logl_flat$base0_locus_starts)
+    #tmp[rev(top_index(tmp$value, 5)), ]  # just take the top 5 from each
+    }) %>%
+  dplyr::bind_rows(.id = "offspring") %>%
+  dplyr::tbl_df() 
+
+# have a look at that
+result <- arrange(comps, desc(value)) %>%
+  mutate(number = 1:nrow(.)) %>%
+  mutate(id1 = rownames(juvie_mat)[as.integer(offspring)],
+         id2 = rownames(adult_mat)[ind])
+
+result %>% filter(number <= 1000)
+
+```
+
+Try plotting all those pairs, and compare them to the simulated values
+```{r plot-all-pairs-density}
+simlogls <- extract_logls(Q = Qs, numer = c(PO = 1), denom = c(U = 1))
+ggplot(result, aes(x = value)) +
+  geom_density() +
+  geom_density(data = simlogls, aes(x = logl_ratio, fill = true_relat), alpha = 0.5)
+```
+
+Note that some of the individuals appear to have lots of offspring:
+```{r tally-adults}
+result %>% 
+  filter(value > 10) %>% 
+  group_by(ind, id2) %>% 
+  tally() %>% 
+  arrange(desc(n))
+```
+
+What if we do that with the offspring.  Hopefully we won't find mutliple parents (or at least
+no more than two).
+```{r tally-juveniles}
+offnums <- result %>% 
+  filter(value > 10) %>% 
+  group_by(offspring, id1) %>% 
+  tally() %>% 
+  arrange(desc(n))
+
+offnums
+```
+
+Holy Smokes! That is just what it should look like if this were correct.  That is encouraging!
+
+## Let's take a closer look at these apparently large families
+
+```{r checking-again}
+num_offs_frame <- result %>% 
+  filter(value > 10) %>% 
+  group_by(ind, id2) %>% 
+  mutate(num_offs = n()) %>%
+  arrange(desc(num_offs), id2, desc(value))
+
+num_offs_frame
+```
+
+## A closer look at the offspring with apparently two parents
+
+```{r closer-offspring}
+ result %>% 
+  filter(value > 10) %>% 
+  group_by(offspring, id1) %>% 
+  filter(n() == 2) %>%
+  arrange(offspring) %>%
+  summarise(mapa1 = min(ind),
+         mapa2 = max(ind)) %>%
+  group_by(mapa1, mapa2) %>% 
+  tally()
+```
+
+OK, that is kind of ugly looking.  
+
+Hmmm....we really need to look at these on a locus-by-locus basis.
+
+
 
