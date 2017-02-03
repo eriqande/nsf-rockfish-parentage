@@ -33,7 +33,8 @@ kelp_ad <- meta %>%
   select(NMFS_DNA_ID) %>% unlist() %>% unname()
 
 kelp_juv <- species %>%
-  filter(score > 99.9) %>%
+  filter(species == "atrovirens",
+         score > 99.9) %>%
   select(NMFS_DNA_ID) %>% unlist() %>% unname
 
 ```
@@ -194,62 +195,144 @@ Try plotting all those pairs, and compare them to the simulated values
 ```{r plot-all-pairs-density}
 simlogls <- extract_logls(Q = Qs, numer = c(PO = 1), denom = c(U = 1))
 ggplot(result, aes(x = value)) +
-  geom_density() +
+  geom_density(colour = "red") +
   geom_density(data = simlogls, aes(x = logl_ratio, fill = true_relat), alpha = 0.5)
 ```
+OK, that is nice to see.  It is a little hard to make out---the red line above is the
+observed distribution from all the pairs.  You see that it lands almost perfectly on
+top of the simulated distribution for unrelated pairs.  That is good! It looks super clean.  
 
-Note that some of the individuals appear to have lots of offspring:
-```{r tally-adults}
-result %>% 
-  filter(value > 10) %>% 
-  group_by(ind, id2) %>% 
-  tally() %>% 
-  arrange(desc(n))
+
+However, there are some troubling things here.  With a Logl Cutoff of 10 we should
+expect almost no false positives, and yet R031681 is in three different pairs at that
+level.  That is the only one that seems to have multiple parents, but it is a little
+bit disquieting.  Here are this individual's genotypes:
+```{r weird-fish}
+ kelp_idx_frame %>% 
+  filter(NMFS_DNA_ID == "R031681")
+```
+And here we can look at all its info:
+```{r all-weird}
+kelp_genos %>% 
+  filter(NMFS_DNA_ID == "R031681") 
+```
+It has good read depths, but terrible allele balances at most loci.  That is super fishy.
+
+What if we look at one of the other fish in there?
+```{r another-one}
+kelp_genos %>% 
+  filter(NMFS_DNA_ID == "R015337") 
+```
+Those allele balances all tend to be larger than 0.7
+
+### Contamination at R031681?
+
+OK! My guess is that R031681 is a mixture of DNA from a two or more fish.  Since we are just taking the top two highest read-depth
+haplotypes from each individual, at present, we wouldn't notice that this individual had super high read depths.  But,
+we can easily go figure that out by grabbing this guys complete raw data and having a look at it.  
+```{r check-contam, rows.print=20}
+readRDS("../extdata/haplot-rds/gtseq50_96loci.rds") %>%
+  tbl_df() %>%
+  filter(id == "s13413") %>%
+  arrange(locus, desc(depth))
+```
+Let's compare that to another individual, our friend R015337 from above:
+```{r check-contam2, rows.print=20}
+readRDS("../extdata/haplot-rds/gtseq33_96loci.rds") %>%
+  tbl_df() %>%
+  filter(id == "s7267") %>%
+  arrange(locus, desc(depth))
+```
+Wow! Take a look at Plate_2_G06_Sat_EW987118_consensus (tab 3) between those fish, or tag_id_1184.  
+
+Another thing to look at would be to check out the individual heterozygosities of all these fish.
+
+### Looking at internal heterozygosities
+
+If that guy is noticeably contaminated, we should see it in elevated internal heterozygosities.
+We can do that like this:
+```{r compute-int-hzs}
+int_hz <- kg2 %>% 
+  group_by(NMFS_DNA_ID, Locus) %>% 
+  summarise(hz = Allele[1]!=Allele[2]) %>% 
+  filter(!is.na(hz)) %>% 
+  group_by(NMFS_DNA_ID) %>% 
+  summarise(num_loc = n(), num_hz = sum(hz), fract_hz = num_hz / num_loc)
+```
+And now let us plot that and also put all the individuals (parents and offpring) that look likely
+above on it.
+```{r plot-int-hz}
+
 ```
 
-What if we do that with the offspring.  Hopefully we won't find mutliple parents (or at least
-no more than two).
-```{r tally-juveniles}
-offnums <- result %>% 
-  filter(value > 10) %>% 
-  group_by(offspring, id1) %>% 
-  tally() %>% 
-  arrange(desc(n))
+##  Another tack---look at the few possible trios
 
-offnums
-```
+This is just left here from other stuff. I can cannibalize some of the code for looking at that weird fish.
 
-Holy Smokes! That is just what it should look like if this were correct.  That is encouraging!
 
-## Let's take a closer look at these apparently large families
 
-```{r checking-again}
-num_offs_frame <- result %>% 
-  filter(value > 10) %>% 
-  group_by(ind, id2) %>% 
-  mutate(num_offs = n()) %>%
-  arrange(desc(num_offs), id2, desc(value))
-
-num_offs_frame
-```
-
-## A closer look at the offspring with apparently two parents
-
-```{r closer-offspring}
- result %>% 
+Another way to get at the issue that I think selection on some loci may be screwing
+up the relationship inference is to look at the handful of individuals that had 
+two inferred parents and check the trios for compatibility.  If they are spuriously-inferred
+parents it should be pretty easy to identify incompatiblities.  But if they are correct, then
+there should be no incompatibilities.  In the process, I will want to carry around the CKMR 
+integer index of the allele (easier to look at and compare across generations) and I would also
+like to have the allele frequencies (though I could add those on later.)
+```{r inspect-trios}
+two_pars <- result %>% 
   filter(value > 10) %>% 
   group_by(offspring, id1) %>% 
   filter(n() == 2) %>%
-  arrange(offspring) %>%
-  summarise(mapa1 = min(ind),
-         mapa2 = max(ind)) %>%
-  group_by(mapa1, mapa2) %>% 
-  tally()
+  arrange(offspring)
+
+kid_ma_pa <- two_pars %>%
+  group_by(offspring) %>%
+  summarise(trio = paste(id1[1], id2[1], id2[2], sep = "-", collapse = "-"),
+            kid = id1[1], ma = id2[1], pa = id2[2])
+
+# now we join the genotypes on there for kid, "pa", and "ma"
+trios_alleles <- kid_ma_pa %>%
+  left_join(., kelp_genos %>% select(NMFS_DNA_ID, locus, gene_copy, allele) %>% rename(kid_allele = allele), by = c("kid" = "NMFS_DNA_ID")) %>%
+  left_join(., kelp_genos %>% select(NMFS_DNA_ID, locus, gene_copy, allele) %>% rename(ma_allele = allele), by = c("ma" = "NMFS_DNA_ID", "locus", "gene_copy")) %>% 
+  left_join(., kelp_genos %>% select(NMFS_DNA_ID, locus, gene_copy, allele) %>% rename(pa_allele = allele), by = c("pa" = "NMFS_DNA_ID", "locus", "gene_copy"))
+
+# put the allele indexes on there to make it easier to read
+kg_alles <- kg_ckmr_markers %>%
+  select(Locus, Allele, AlleIdx) %>%
+  rename(locus = Locus, allele = Allele, alle_idx = AlleIdx)
+
+trios_idx <- trios_alleles %>%
+  left_join(kg_alles %>% rename(kid_allele = allele, kid_alle_idx = alle_idx)) %>%
+  left_join(kg_alles %>% rename(ma_allele = allele, ma_alle_idx = alle_idx)) %>%
+  left_join(kg_alles %>% rename(pa_allele = allele, pa_alle_idx = alle_idx))
+
+# now we can look for incompatibilities
+compats <- trios_idx %>%
+  group_by(trio, locus) %>%
+  mutate(compat = (kid_allele[1] == kid_allele[2] & (kid_allele[1] %in% ma_allele & kid_allele[1] %in% pa_allele)) | 
+           ( (kid_allele[1] != kid_allele[2]) & (
+                 (kid_allele[1] %in% ma_allele & kid_allele[2] %in% pa_allele) | 
+                                                 (kid_allele[2] %in% ma_allele & kid_allele[1] %in% pa_allele) ) ))
+
+compats
 ```
 
-OK, that is kind of ugly looking.  
+That is worth looking at, but we can also summarize it by counting up the number of trio-incompatibilities for each of those offspring:
+```{r count-trio-incompats}
+compats %>%
+  group_by(offspring) %>%
+  summarise(num_incompat_loci = sum(compat == FALSE, na.rm = TRUE) / 2,
+            num_non_missing_loci = sum(!is.na(compat)) / 2)
+```
 
-Hmmm....we really need to look at these on a locus-by-locus basis.
+So that pretty much settles it---the actual false positive rate here is clearly higher than what we think it should be.  So, now we have to figure out
+why that is.  Could be subdivision in the sample (either real or from a laboratory error?) Hmmm...
 
+The other thing that is obviously worrisome is the shape of the Logl Distribution above (the black line)
+for all the pairs.  It is almost bimodal, with some values much lower than what we get from simulation and 
+also another peak which is higher than we get from simulation.  Almost as if there is some
+unexpected structure in the data.  
+
+So, the obvious thing to do would be a PCA with all the adults and all the juvies.
 
 
