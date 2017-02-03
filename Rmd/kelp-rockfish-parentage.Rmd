@@ -389,4 +389,30 @@ seems like we might want to consider confirming them with a ddRAD run or somethi
 
 All in all though, I think we do have a handful of very strong PO pairs.
 
+## Look at the meta data for those fish
+
+Have a quick looksie:
+```{r po-meta}
+meta_trim <- meta %>%
+  select(NMFS_DNA_ID, SAMPLE_ID, LENGTH, REPORTED_LIFE_STAGE, COLLECTION_DATE, SITE, LATITUDE_M, LONGITUDE_M, SAMPLE_COMMENTS, LOCATION_COMMENTS_M)
+
+good_pairs <- good_uns %>%
+  select(-offspring, -ind, -y, -number) %>%
+  rename(offspring = id1, 
+         parent = id2,
+         po_u_logl = value) %>%
+  select(offspring, parent, everything())
+
+meta_juv <- meta_trim
+names(meta_juv) <- paste("juv", names(meta_juv), sep = "_")
+meta_ad <- meta_trim
+names(meta_ad) <- paste("ad", names(meta_ad), sep = "_")
+
+pairs_with_meta <- left_join(good_pairs, meta_juv, by = c("offspring" = "juv_NMFS_DNA_ID")) %>%
+  left_join(., meta_ad, by = c("parent" = "ad_NMFS_DNA_ID"))
+
+write_csv(pairs_with_meta, "csv_outputs/pairs_with_meta.csv")
+
+pairs_with_meta
+```
 
