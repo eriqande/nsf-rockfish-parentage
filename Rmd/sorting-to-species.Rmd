@@ -80,7 +80,7 @@ no_hi_missers <- geno_one_each %>%
   filter(sum(!is.na(allele)) >= (85*2))
 ```
 That leaves us with `r length(unique(geno_one_each$NMFS_DNA_ID))` individuals.  Those are the ones that
-we will run through structure to identify to species.
+we will run through gsi_sim to identify to species.
 
 
 

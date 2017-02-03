@@ -6,8 +6,10 @@ output:
 ---
 
 
-This is a first stab at winnowing down our samples to just a few species of rockfish,
-and figuring out which they are.  I am going to go for this with structure.
+This is a first stab at parentage on kelp rockfish.  In a previous document, I assumed that
+all the adult kelp rockfish were correctly ID-ed and I used them as a baseline to do GSI of all
+the juvenile samples that could have some kelp rockfish in them.  I save those results and use
+that here...
 
 
 To start off with, let's load data and libs:
@@ -18,7 +20,7 @@ library(stringr)
 
 meta <- readRDS("../data/processed/meta-data-tibble.rds")
 genos <- readRDS("../extdata/processed/genos-aggregated-and-no-hi-missers.rds")
-species <- readRDS("../data/processed/juvie-gsi-sim-assignments.rds") 
+species <- readRDS("../data/processed/juvie-gsi-sim-assignments.rds")   # gsi assignments of juvenile fish
 ```
 
 
@@ -74,7 +76,7 @@ Great! We have a total `r nrow(kg_ckmr_markers)` alleles in this data set.
 
 Really simply let's just do this to see what our power for parentage ought to look like.
 ```{r CKMR-create}
-CK <- create_ckmr(kg_ckmr_markers, kappa_matrix = kappas[c("PO", "FS", "U"), ])
+CK <- create_ckmr(kg_ckmr_markers, kappa_matrix = kappas[c("PO", "FS", "HS", "U"), ])
 
 # see what it tells us when we print it:
 CK
@@ -83,7 +85,7 @@ CK
 Then do the simulations to see what the false positive rates are for finding parents when the truth
 is U or FS:
 ```{r CKMR-sim-and-sample}
-Qs <- simulate_Qij(C = CK, froms = c("PO", "FS", "U"), tos = c("PO", "FS", "U"), reps = 10^4)
+Qs <- simulate_Qij(C = CK, froms = c("PO", "FS", "HS", "U"), tos = c("PO", "FS", "HS", "U"), reps = 10^4)
 
 # then do the importance sampling to get the FPRs
 mc_sample_simple(Qs, nu = "PO", de = c("U", "FS"), tr = c("U", "FS"), method = "both")
@@ -192,11 +194,12 @@ result %>% filter(number <= 1000)
 ```
 
 Try plotting all those pairs, and compare them to the simulated values
-```{r plot-all-pairs-density}
+```{r plot-all-pairs-density, fig.width = 12}
 simlogls <- extract_logls(Q = Qs, numer = c(PO = 1), denom = c(U = 1))
 ggplot(result, aes(x = value)) +
   geom_density(colour = "red") +
-  geom_density(data = simlogls, aes(x = logl_ratio, fill = true_relat), alpha = 0.5)
+  geom_density(data = simlogls, aes(x = logl_ratio, fill = true_relat), alpha = 0.25) +
+  scale_x_continuous(breaks = seq(-170, 60, by = 10))
 ```
 OK, that is nice to see.  It is a little hard to make out---the red line above is the
 observed distribution from all the pairs.  You see that it lands almost perfectly on
@@ -261,78 +264,129 @@ int_hz <- kg2 %>%
 ```
 And now let us plot that and also put all the individuals (parents and offpring) that look likely
 above on it.
-```{r plot-int-hz}
+```{r plot-int-hz, fig.width=12}
+# first get the IDs of all the ones in pairs with LogL > 10
+tmp <- result %>% filter(value > 10)
+likelies <- int_hz %>% 
+  filter(NMFS_DNA_ID %in% unique(c(tmp$id1, tmp$id2))) %>%
+  arrange(fract_hz) %>%
+  mutate(y = -0.1)
+
+ggplot(int_hz, aes(x = fract_hz)) +
+  geom_density(fill = "orange", alpha = 0.3) +
+  geom_point(data = likelies, mapping = aes(x = fract_hz, y = y)) +
+  geom_text(data = likelies, mapping = aes(x = fract_hz, y = y, label = NMFS_DNA_ID), angle = 60, hjust = 1.2, size = 3) +
+  ylim(-1,9)
+```
+OK! That is pretty definitive: R031681 is out!
+
+
+## Checking the logls
+
+As long as we are at it, we may as well plot the distribution of our LogL>10, non-contaminated individuals 
+against the backdrop of our simulated PO/U LogL values for true parent offspring pairs, to make sure there is
+nothing weird going on there.
+```{r plot-po-logls}
+good_uns <- result %>% 
+  filter(value > 10,
+         id1 != "R031681") %>%
+  mutate(y = 0.001)
+po_frame <- simlogls %>% 
+  filter(true_relat == "PO")
+ggplot() +
+  geom_density(data = po_frame, aes(x = logl_ratio), fill = "green", alpha = 0.3) +
+  geom_point(data = good_uns, aes(x = value, y = y))
 
 ```
 
-##  Another tack---look at the few possible trios
+Note that the two with the lowest LogLs are kinda lower than we would really expect, but
+not totally impossible.  Check which ones those are again:
+```{r print-good-uns}
+good_uns
+```
+But, otherwise, those values look pretty reasonable.  
 
-This is just left here from other stuff. I can cannibalize some of the code for looking at that weird fish.
+## Could they be other types of relatives?
 
-
-
-Another way to get at the issue that I think selection on some loci may be screwing
-up the relationship inference is to look at the handful of individuals that had 
-two inferred parents and check the trios for compatibility.  If they are spuriously-inferred
-parents it should be pretty easy to identify incompatiblities.  But if they are correct, then
-there should be no incompatibilities.  In the process, I will want to carry around the CKMR 
-integer index of the allele (easier to look at and compare across generations) and I would also
-like to have the allele frequencies (though I could add those on later.)
-```{r inspect-trios}
-two_pars <- result %>% 
-  filter(value > 10) %>% 
-  group_by(offspring, id1) %>% 
-  filter(n() == 2) %>%
-  arrange(offspring)
-
-kid_ma_pa <- two_pars %>%
-  group_by(offspring) %>%
-  summarise(trio = paste(id1[1], id2[1], id2[2], sep = "-", collapse = "-"),
-            kid = id1[1], ma = id2[1], pa = id2[2])
-
-# now we join the genotypes on there for kid, "pa", and "ma"
-trios_alleles <- kid_ma_pa %>%
-  left_join(., kelp_genos %>% select(NMFS_DNA_ID, locus, gene_copy, allele) %>% rename(kid_allele = allele), by = c("kid" = "NMFS_DNA_ID")) %>%
-  left_join(., kelp_genos %>% select(NMFS_DNA_ID, locus, gene_copy, allele) %>% rename(ma_allele = allele), by = c("ma" = "NMFS_DNA_ID", "locus", "gene_copy")) %>% 
-  left_join(., kelp_genos %>% select(NMFS_DNA_ID, locus, gene_copy, allele) %>% rename(pa_allele = allele), by = c("pa" = "NMFS_DNA_ID", "locus", "gene_copy"))
-
-# put the allele indexes on there to make it easier to read
-kg_alles <- kg_ckmr_markers %>%
-  select(Locus, Allele, AlleIdx) %>%
-  rename(locus = Locus, allele = Allele, alle_idx = AlleIdx)
-
-trios_idx <- trios_alleles %>%
-  left_join(kg_alles %>% rename(kid_allele = allele, kid_alle_idx = alle_idx)) %>%
-  left_join(kg_alles %>% rename(ma_allele = allele, ma_alle_idx = alle_idx)) %>%
-  left_join(kg_alles %>% rename(pa_allele = allele, pa_alle_idx = alle_idx))
-
-# now we can look for incompatibilities
-compats <- trios_idx %>%
-  group_by(trio, locus) %>%
-  mutate(compat = (kid_allele[1] == kid_allele[2] & (kid_allele[1] %in% ma_allele & kid_allele[1] %in% pa_allele)) | 
-           ( (kid_allele[1] != kid_allele[2]) & (
-                 (kid_allele[1] %in% ma_allele & kid_allele[2] %in% pa_allele) | 
-                                                 (kid_allele[2] %in% ma_allele & kid_allele[1] %in% pa_allele) ) ))
-
-compats
+We have seen above that most full siblings  can have PO/U logls that are right around 10.  Half-siblings can also
+see PO/U logls in that ballpark.  It is super unlikely that you would have an adult full sibling of anyone recruiting
+this year, but it is possible that you could have a half-sibling.  I should look at the PO/HS and PO/FS LogLs for all
+8 of our candidate PO pairs.  First off, let's see what those ratios look like for 
+PO vs HS or FS.  
+```{r plot-fs-ratios, fig.width = 8}
+po_fs <- extract_logls(Qs, numer = c(PO = 1), denom = c(FS = 1)) 
+ggplot(po_fs, aes(x = logl_ratio, fill = true_relat)) +
+  geom_density(alpha = 0.25) +
+  ggtitle("PO/FS Log-likelihood Ratios")
 ```
 
-That is worth looking at, but we can also summarize it by counting up the number of trio-incompatibilities for each of those offspring:
-```{r count-trio-incompats}
-compats %>%
-  group_by(offspring) %>%
-  summarise(num_incompat_loci = sum(compat == FALSE, na.rm = TRUE) / 2,
-            num_non_missing_loci = sum(!is.na(compat)) / 2)
+```{r plot-hs-ratios, fig.width = 8}
+po_hs <- extract_logls(Qs, numer = c(PO = 1), denom = c(HS = 1)) 
+ggplot(po_hs, aes(x = logl_ratio, fill = true_relat)) +
+  geom_density(alpha = 0.25) +
+  ggtitle("PO/HS Log-likelihood Ratios")
 ```
 
-So that pretty much settles it---the actual false positive rate here is clearly higher than what we think it should be.  So, now we have to figure out
-why that is.  Could be subdivision in the sample (either real or from a laboratory error?) Hmmm...
+OK, so, not super easy to resolve these things, but it might be worth computing them.
 
-The other thing that is obviously worrisome is the shape of the Logl Distribution above (the black line)
-for all the pairs.  It is almost bimodal, with some values much lower than what we get from simulation and 
-also another peak which is higher than we get from simulation.  Almost as if there is some
-unexpected structure in the data.  
+### Computing PO/FS and PO/HS for the good_uns
 
-So, the obvious thing to do would be a PCA with all the adults and all the juvies.
+First we need to filter down or genotype matrices to include only the offspring and the adults that
+are in good_uns.
+```{r filter-matrices}
+adult_mat_filt <- adult_mat[good_uns$id2, ]
+juvie_mat_filt <- juvie_mat[good_uns$id1, ]
+```
+Then flatten some more CKMR objects and compute the ratios:
+```{r more-flattening}
+fs_flat <- flatten_ckmr(CK, "FS")
+hs_flat <- flatten_ckmr(CK, "HS")
+
+po_fs_logl_flat <- po_flat
+po_fs_logl_flat$probs <- log(po_flat$probs / fs_flat$probs)
+
+po_hs_logl_flat <- po_flat
+po_hs_logl_flat$probs <- log(po_flat$probs / hs_flat$probs)
+```
+
+Then do the comparisons.  This is fast because it is only a few of them.
+```{r do-handful-of-comps-fs}
+idx <- 1:nrow(juvie_mat_filt)
+names(idx) <- idx
+result_po_fs <- lapply(idx, function(i) {
+    tmp <- comp_ind_pairwise(S = adult_mat_filt, T = juvie_mat_filt, t = i, values = po_fs_logl_flat$probs, nGenos = po_fs_logl_flat$nGenos, Starts = po_fs_logl_flat$base0_locus_starts)
+    #tmp[rev(top_index(tmp$value, 5)), ]  # just take the top 5 from each
+    }) %>%
+  dplyr::bind_rows(.id = "offspring") %>%
+  dplyr::tbl_df()  %>%
+  filter(offspring == ind) %>%  # just filter it down to the ones we want here...
+  rename(po_fs_logl = value) %>%
+  mutate(id1 = rownames(juvie_mat_filt)[as.integer(offspring)],
+         id2 = rownames(adult_mat_filt)[ind])
+
+result_po_fs
+```
+
+And the same for half-sibling ratios:
+```{r do-handful-of-comps-hs}
+idx <- 1:nrow(juvie_mat_filt)
+names(idx) <- idx
+result_po_hs <- lapply(idx, function(i) {
+    tmp <- comp_ind_pairwise(S = adult_mat_filt, T = juvie_mat_filt, t = i, values = po_hs_logl_flat$probs, nGenos = po_hs_logl_flat$nGenos, Starts = po_hs_logl_flat$base0_locus_starts)
+    #tmp[rev(top_index(tmp$value, 5)), ]  # just take the top 5 from each
+    }) %>%
+  dplyr::bind_rows(.id = "offspring") %>%
+  dplyr::tbl_df()  %>%
+  filter(offspring == ind) %>%  # just filter it down to the ones we want here...
+  rename(po_hs_logl = value) %>%
+  mutate(id1 = rownames(juvie_mat_filt)[as.integer(offspring)],
+         id2 = rownames(adult_mat_filt)[ind])
+
+result_po_hs
+```
+So, R013607 is not looking super strong as a PO pair.  Could be a half-sibling.  There are so few of them that it
+seems like we might want to consider confirming them with a ddRAD run or something.
+
+All in all though, I think we do have a handful of very strong PO pairs.
 
 
