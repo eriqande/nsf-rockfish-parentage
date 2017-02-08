@@ -14,9 +14,13 @@ that here...
 
 To start off with, let's load data and libs:
 ```{r load-stuff}
+library(gRbase)  
+library(RBGL)  # this one comes from BioConductor: source("https://bioconductor.org/biocLite.R"); biocLite("RBGL")
+
 library(tidyverse)
 library(CKMRsim)
 library(stringr)
+
 
 meta <- readRDS("../data/processed/meta-data-tibble.rds")
 genos <- readRDS("../extdata/processed/genos-aggregated-and-no-hi-missers.rds")
@@ -331,7 +335,7 @@ OK, so, not super easy to resolve these things, but it might be worth computing 
 
 ### Computing PO/FS and PO/HS for the good_uns
 
-First we need to filter down or genotype matrices to include only the offspring and the adults that
+First we need to filter down our genotype matrices to include only the offspring and the adults that
 are in good_uns.
 ```{r filter-matrices}
 adult_mat_filt <- adult_mat[good_uns$id2, ]
@@ -416,3 +420,273 @@ write_csv(pairs_with_meta, "csv_outputs/pairs_with_meta.csv")
 pairs_with_meta
 ```
 
+
+
+## Let's look for full-siblings
+
+### Power full full-sib detection
+
+First, we want to see what the distributions of FS/U LogLs look like for
+FS, U, and HS.  This is pretty straightforward to do with the ckmr object we made:
+```{r plot-fs-logls, fig.width=8}
+fs_u <- extract_logls(Qs, numer = c(FS = 1), denom = c(U = 1))
+ggplot(fs_u, aes(x = logl_ratio, fill = true_relat)) +
+  geom_density(alpha = 0.25) +
+  ggtitle("FS/U Log-likelihood Ratios")
+```
+
+And we can compute the false positive rates as well:
+```{r fs-fprs}
+mc_sample_simple(Qs, nu = "FS", de = c("U"), tr = c("U", "FS", "HS", "PO"), method = "both")
+```
+
+### Doing the pairwise comparisons
+
+I am just going to bung the parents and juveniles together into a single genotype matrix of all the kelps
+and then I will use my existing function with the same matrix as source and target, then filter out half of 
+them.
+```{r bung-compare-filter}
+all_kelp_pre <- rbind(adult_mat, juvie_mat)
+
+# keep only those with < 0.61 internal HZ
+hz_keepers <- int_hz$NMFS_DNA_ID[int_hz$fract_hz < 0.61]
+hz_keepers <- intersect(hz_keepers, rownames(all_kelp_pre))
+all_kelp_mat <- all_kelp_pre[hz_keepers, ]
+
+# then make the flattened thing
+fs_u_flat <- fs_flat
+fs_u_flat$probs <- log(fs_flat$probs / unrel_flat$probs)
+
+# then do the comparisons, only keep the top 20 for each one
+idx <- 1:nrow(all_kelp_mat)
+names(idx) <- idx
+fs_comps <- lapply(idx, function(i) {
+    tmp <- comp_ind_pairwise(S = all_kelp_mat, T = all_kelp_mat, t = i, values = fs_u_flat$probs, nGenos = fs_u_flat$nGenos, Starts = fs_u_flat$base0_locus_starts)
+    tmp[rev(top_index(tmp$value, 20)), ]
+    }) %>%
+  dplyr::bind_rows(.id = "member1") %>%
+  dplyr::tbl_df() %>%
+  rename(member2 = ind) %>%
+  mutate(member1 = as.integer(member1)) %>%
+  filter(member1 < member2) %>%
+  mutate(name1 = rownames(all_kelp_mat)[member1],
+         name2 = rownames(all_kelp_mat)[member2]) %>%
+  arrange(desc(value))
+
+```
+
+OK, that is pretty cool.  But we really need a little metadata on there to know who these individuals are.
+```{r tidy-fs-comps-meta}
+mini_meta <- meta %>%
+  select(NMFS_DNA_ID, REPORTED_LIFE_STAGE, COLLECTION_DATE, LATITUDE_M, LONGITUDE_M)
+mm1 <- mini_meta
+names(mm1) <- c("name1", "stage1", "date1", "lat1", "long1")
+mm2 <- mini_meta
+names(mm2) <- c("name2", "stage2", "date2", "lat2", "long2")
+
+fs_comps_meta <- fs_comps %>%
+  left_join(., mm1) %>%
+  left_join(., mm2)
+
+# and, don't forget that we have to toss out the parent-offspring pairs 
+# that we found
+dumpers <- data_frame(name1 = c(good_uns$id1, good_uns$id2),
+                      name2 = c(good_uns$id2, good_uns$id1))
+  
+high_likely_fs <- fs_comps_meta %>%
+  filter(value > 13) %>%
+  anti_join(dumpers) %>%
+  arrange(member1, member2)
+  
+high_likely_fs
+
+
+```
+Holy Guacomole!  I think what we have here is clear evidence of at least one 
+large full sibling groups amongst the adults.  Like more than 15 individuals. Wow!  Also,
+some full siblings amongst the juveniles---but not massive full sib groups.  
+
+At a cursory glance it appears that all the 
+dates check out.  
+
+I need to find connected components to figure out what the actual FS groups are.
+We do this with some graph libraries
+```{r find-connected-groups}
+edgelist <- lapply(1:nrow(high_likely_fs), function(x) c(high_likely_fs$name1[x], high_likely_fs$name2[x]))
+gR <- gRbase::ug(edgelist)
+CnC <- graph::connComp(gR)  # these are the connected components
+CnC_sort <- CnC[base::order(sapply(CnC, length), decreasing = TRUE)]
+
+# so then let's make a sibgroup column in 
+# the high_likely_fs frame
+sib_group_pairs <- lapply(1:length(CnC), function(i) {
+  high_likely_fs %>%
+    filter(name1 %in% CnC_sort[[i]] | name2 %in% CnC[[i]])
+}) %>%
+  bind_rows(.id = "sibgroup") %>%
+  mutate(sibgroup = as.integer(sibgroup)) %>%
+  arrange(sibgroup, desc(value))
+
+# let's save that as CSV
+write_csv(sib_group_pairs, path = "csv_outputs/kelp_rockfish_sibgroup_pairs.csv")
+
+# and show it here
+sib_group_pairs
+```
+
+So, some things to note.  That appears to be a full sibling group of 19 adults.
+Also, it looks to me like `R014981` and `R014982` in sibgroup 2 are probably duplicate
+samples of some sort that I did not manage to filter out. Or there is something
+going on with distortion of allele frequencies
+
+### Is this really a big sibgroup?  
+
+So, this is exciting.  But we need to confirm that this really looks like a large sibgroup.
+
+
+One way we can do that is by counting up the number and distribution of alleles within 
+it.  Obviously there should be no more than 4 alleles and they should be in frequencies of
+multiples of 1/4 or 1/2.  We could do even more by making sure the genotypes were feasible
+FSG-graph genotypes, but we will save that for next (or later).
+```{r check-sibgroup-alleles}
+big_sibgroup_genos <- left_join(kg2, kg_ckmr_markers) %>%
+  filter(NMFS_DNA_ID %in% CnC_sort[[1]])
+
+# now tally up the number of occurrences of each allele at each locus
+big_sibgroup_genos %>%
+  group_by(Locus, Pos, Allele, LocIdx, AlleIdx) %>%
+  tally() %>%
+  ungroup() %>%
+  arrange(LocIdx, desc(n))
+  
+```
+That is not reassuring.  The patterns there do not look like what we would have with a single large full sibling group
+unless there was rampant genotyping error.  
+
+So, let's see what happens if we only take super high-likelihood full sib pairs...
+```{r make-super-high-logl-pairs}
+super_high_likely_fs <- fs_comps_meta %>%
+  filter(value > 35) %>%
+  anti_join(dumpers) %>%
+  arrange(member1, member2)
+
+edgelist2 <- lapply(1:nrow(super_high_likely_fs), function(x) c(super_high_likely_fs$name1[x], super_high_likely_fs$name2[x]))
+gR2 <- gRbase::ug(edgelist2)
+high_CnC <- graph::connComp(gR2)  # these are the connected components
+high_CnC_sort <- high_CnC[base::order(sapply(high_CnC, length), decreasing = TRUE)]
+
+stricter_big_sibgroup_genos <- left_join(kg2, kg_ckmr_markers) %>%
+  filter(NMFS_DNA_ID %in% high_CnC_sort[[1]])
+
+# now tally up the number of occurrences of each allele at each locus
+stricter_big_sibgroup_genos %>%
+  group_by(Locus, Pos, Allele, LocIdx, AlleIdx) %>%
+  tally() %>%
+  ungroup() %>%
+  arrange(LocIdx, desc(n))
+
+```
+
+That is a situation in which we only have retained individuals in the sibgroup which have
+a full-sib loglikelihood ratio of more than 35 (which is huge) to at least one other 
+individual in the full sibship.  So, these should all certainly be full siblings
+in a perfect world.  There are 15 of those individuals.  So, 30 gene copies that we are playing with.  
+This still doesn't look like an actual full sibship.
+
+#### Going for the genotype graphs
+
+OK, we had best look at the genotypes themselves a la Almudevar's 2000 or so paper.
+I am just going to tally up allele-pairs in sorted order and that should give us
+even more insight into this, I hope.
+
+I am also going to slap on the population allele frequencies of these alleles so
+we can see what is going on.  
+
+```{r fsg-geno-graphs}
+afreq_tmp1 <- kg_ckmr_markers %>%
+  select(LocIdx, AlleIdx, Freq)
+afreq_tmp2 <- afreq_tmp1 
+names(afreq_tmp1) <- c("LocIdx", "alle1", "popfreq1")
+names(afreq_tmp2) <- c("LocIdx", "alle2", "popfreq2")
+
+stricter_big_sibgroup_genos %>%
+  group_by(NMFS_DNA_ID, Locus, LocIdx) %>%
+  summarise(alle1 = sort(AlleIdx)[1],
+            alle2 = sort(AlleIdx)[2],
+            geno = paste(alle1, alle2, sep = "-")) %>%
+  group_by(Locus, LocIdx, alle1, alle2, geno) %>%
+  tally() %>%
+  ungroup() %>%
+  left_join(afreq_tmp1) %>%
+  left_join(afreq_tmp2) %>%
+  arrange(LocIdx, desc(n)) %>%
+  mutate(pop_geno_prob = popfreq1 * popfreq2 * (1 + (alle1 != alle2)))
+```
+So, I'm not quite sure what to make of this at this point.
+
+These are the same sorts of patterns I discerned in my brief foray into Dani Ottman's data: a lot of pairs that looked
+like they must be full siblings---but when you look at them all together it is clear that they cannot be a single, large full
+sibling group.
+
+I have already tossed out any individuals that had low internal heterozygosity, so I don't think that is driving the pattern.
+
+The fact that all the siblings in that group were adults is somewhat reassuring that it might not be completely artifactual.  It
+could have something to do with a particular cohort/year-class.
+
+### Locus Specific Contributions To These LogLs
+
+For each pair amongst the super-hi LogL sibship, I wish to investigate the distribution of locus contributions to these likelhoods.
+First, we get all the pairs that have LogLs above 35 and in which one member is in the 
+large connected group.
+```{r get-super-hi-likelies}
+super_hi_pairs1 <- super_high_likely_fs %>%
+  filter(name1 %in% high_CnC_sort[[1]] | name2 %in% high_CnC_sort[[1]])
+```
+There are only 24 of those, which tells us something: very few of the pairs in this connected group
+actually have high full-sib LogL values. OK.
+
+Now we have to make genotype matrices for name1 and name2 members and look at the locus-specific
+contributions:
+```{r loc-spec-contrib}
+SS <- all_kelp_mat[super_hi_pairs1$name1,]
+TT <- all_kelp_mat[super_hi_pairs1$name2,]
+
+loc_spec_vals <- locus_specific_pairwise(S = SS, T = TT,  s = 1:nrow(SS),  t = 1:nrow(TT), values = fs_u_flat$probs, nGenos = fs_u_flat$nGenos, Starts = fs_u_flat$base0_locus_starts) %>%
+  tbl_df() %>%
+  group_by(locus) %>%
+  mutate(locus_mean_val = mean(value)) %>%
+  arrange(desc(locus_mean_val))
+
+loc_spec_vals
+```
+We can see which loci on average are contributing a lot to the LogL and then go check the 
+genotype counts at those loci.  There are some funny things, it seems to me. I'm perplexed. 
+I suppose it could be a bunch of nested half-sibs.  It is odd.  
+
+## Dump those dudes to Colony
+
+I am going to save the IDs of those individuals that were in the big group
+that looked sibship-like, and I will dump their genotypes as well and the 
+allele freqs for all the alleles so that we can use that in Colony.  
+
+So, what we do here is dump a bunch of stuff
+```{r assemble-output-list}
+
+duplicate_samples <- def_same %>% 
+  tbl_df() %>% 
+  mutate(id1 = rownames(rocky_mat)[ind1], id2 = rownames(rocky_mat)[ind2])
+
+
+output_list <- list(
+  kelp_idx_frame = kelp_idx_frame,  # these are the haplotypes of each individual in numeric-allelic form
+  kg_ckmr_markers = kg_ckmr_markers,   # allele freqs in CKMR long format
+  CnC_sort = CnC_sort,
+  top_po_pairs = result %>% filter(number <= 11),
+  duplicate_samples = duplicate_samples,
+  int_hz = int_hz
+)
+
+dir.create("rds_outputs")
+saveRDS(output_list, file = "rds_outputs/kr-parentage-output-list.rds", compress = "xz")
+
+```
