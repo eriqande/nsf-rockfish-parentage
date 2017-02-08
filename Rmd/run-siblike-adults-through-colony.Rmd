@@ -1,0 +1,18 @@
+---
+title: "Running the suspicious kelp rockfish sib-like adults through Colony"
+output: 
+  html_notebook:
+    toc: true
+---
+
+
+```{r load-em}
+library(tidyverse)
+```
+
+So, to get to this point we had to run through "sorting-to-species.Rmd" and also
+"kelp-rockfish-parentage.Rmd".  That last one creates an output file RDS that we can 
+use here:
+```{r load-data}
+dat <- readRDS("rds_outputs/kr-parentage-output-list.rds")
+```
