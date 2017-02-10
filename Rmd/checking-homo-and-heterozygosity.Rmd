@@ -1,0 +1,124 @@
+---
+title: "Visually Checking Homozygosity"
+output: 
+  html_notebook:
+    toc: true
+---
+
+
+## Introduction
+
+I just want to make some pictures like what I did with some of the PIRE rad data
+and the Lobster data that showed the remarkable heterozygote deficits.  
+
+The hope is that I will be able to make the point that our microhaplotype data
+do not suffer from the same issues.  And, at any rate, it is something that
+should be investigated.
+
+
+To get to this point we had to run through "sorting-to-species.Rmd" and also
+"kelp-rockfish-parentage.Rmd".  That last one creates an output file RDS that we can 
+use here:
+```{r load-data}
+library(tidyverse)
+library(CKMRsim)
+
+dat <- readRDS("rds_outputs/kr-parentage-output-list.rds")
+```
+
+
+## Getting the data together
+
+For each allele we have the allele frequencies. Let's name them somehing better, and while we
+are at it, compute the expected frequency of homozygotes and heterozygotes for each 
+allele.
+```{r get-freqs}
+freqs <- dat$kg_ckmr_markers %>%
+  mutate(exp_homoz = Freq ^ 2,
+         exp_het = 2 * Freq * (1 - Freq))
+```
+
+Now, we also want to put together the observed rates of homozygosity for each allele.
+There will be some weird counting for the heterozygotes because some genotypes are placed into
+two het categories, but that is OK. The expectations are still the same, even though things will 
+be correlated.
+
+First, get genotypes:
+```{r get-genos}
+genos <- dat$kelp_idx_frame %>%
+  rename(alle1 = `1`,
+         alle2 = `2`) %>%
+  select(-GenoIdx, -NumA) %>%
+  mutate(homoz = alle1 == alle2)
+
+genos[1:20,]
+```
+
+Then compute the fraction of homozygous genotypes.  To do this we count up the number
+of homozygous genotypes of each allelic type, and then divide by the total number
+of genotypes at the locus. 
+```{r count-homoz}
+homoz_counts <- genos %>%
+  group_by(LocIdx, alle1, homoz) %>%
+  tally() %>%
+  group_by(LocIdx) %>%
+  mutate(tot_genos = sum(n),
+         obs_homoz = n / tot_genos) %>%
+  filter(homoz == TRUE) %>%
+  rename(AlleIdx = alle1)
+  
+  
+```
+
+Then we need to join that to the freqs, 
+and while doing that, it is going to be nice to compute the standard deviations around the
+expected values, and a z-score, so we cqn make a little comparison of how far out the observed values fall.
+```{r join-obs-exp}
+exp_and_obs <- freqs %>%
+  left_join(homoz_counts) %>%
+  mutate(exp_SD = sqrt(exp_homoz * (1 - exp_homoz) / tot_genos),
+         zscore = (obs_homoz - exp_homoz) / exp_SD)
+```
+```{r plot-z}
+hist(exp_and_obs$zscore, breaks = 50)
+```
+It is interesting to look at those with Z-scores above 3, but we want to be sure
+to filter so that we expected to see at least 10 or 20, so that we don't have a lot
+of the singletons in there
+```{r investigate-outliers}
+nasties <- exp_and_obs %>% 
+  filter(exp_homoz * tot_genos >= 10) %>%
+  filter(zscore > 3) %>%
+  select(Locus, LocIdx, AlleIdx, Freq, exp_homoz, obs_homoz, n, tot_genos, zscore) %>%
+  mutate(quick_dirty = (obs_homoz - exp_homoz) / (2 * Freq))
+nasties
+```
+
+While we are at it,  let's look at the total number of genotypes at each locus:
+```{r count-tot-genos}
+tot_by_locus <- exp_and_obs %>%
+  group_by(Locus, LocIdx) %>%
+  summarise(ngenos = mean(tot_genos, na.rm = TRUE))
+
+tot_by_locus
+```
+And make a plot of that
+```{r tot-hist}
+hist(tot_by_locus$ngenos, breaks = 30)
+```
+
+Now, plot the homozygosities:
+```{r plot-it}
+ggplot(exp_and_obs, aes(x = exp_homoz, y = obs_homoz)) +
+  geom_abline(intercept = 0, slope = 1, colour = "red") +
+  geom_point()
+
+```
+And, finally, print out the data with the Z-scores:
+```{r output-stuff}
+saveRDS(exp_and_obs, file = "rds_outputs/exp_and_obs_homozygosity.rds", compress = "xz")
+```
+
+
+
+

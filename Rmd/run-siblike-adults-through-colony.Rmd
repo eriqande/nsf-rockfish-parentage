@@ -8,11 +8,154 @@ output:
 
 ```{r load-em}
 library(tidyverse)
+library(CKMRsim)
 ```
+
+## Introduction
 
 So, to get to this point we had to run through "sorting-to-species.Rmd" and also
 "kelp-rockfish-parentage.Rmd".  That last one creates an output file RDS that we can 
 use here:
 ```{r load-data}
-dat <- readRDS("rds_outputs/kr-parentage-output-list.rds")
+dat <- readRDS("rds_outputs/84-loci-kr-parentage-output-list.rds")
 ```
+
+
+## Preparing Data
+
+First get the genotype data into the format that CKMR needs to convert
+to colony.  Basically just need to change some column headings
+```{r format-genos}
+genos <- dat$kelp_idx_frame %>%
+  rename(id = NMFS_DNA_ID,
+         alle1 = `1`,
+         alle2 = `2`) %>%
+  select(id, Locus, LocIdx, alle1, alle2)
+
+genos
+```
+
+
+Now, what we need to do is pick out some 100 individuals that were not dupes, did not 
+have aberrant internal HZ and were not part of the sibling pairs that
+we found, and were not juvenile members of the parent-offspring pairs we found, 
+and we will add those to the 19 indvividuals that were part of that
+big sibship-looking thing.  
+```{r find-bland}
+everyone <- unique(genos$id)
+
+# here about 270 fish we don't want in there
+tossers <- c(dat$duplicate_samples$id1,
+             dat$duplicate_samples$id2,
+             dat$top_po_pairs$id1, 
+             dat$int_hz$NMFS_DNA_ID[dat$int_hz$fract_hz > .60 | dat$int_hz$fract_hz < .27],
+             unlist(dat$CnC_sort[-1]))
+
+set.seed(5)
+extras <- sample(setdiff(everyone, tossers), size = 150, replace = FALSE)
+
+for_colony <- c(dat$CnC_sort[[1]], extras)  # about 169 individuals
+
+genos_for_colony <- genos %>%
+  filter(id %in% for_colony)
+```
+So, now we have 168 individuals, 19 or which were part of that sibship-looking thing.
+
+## A weird finding
+
+Holy Smokes! Check this out.  Of the 19 fish in the sibship-like thing, three of them also turned
+up as possible parent pairs.  (Though not after dropping the null-allele-ish loci.)
+```{r check-common-fish}
+shared <- intersect(dat$CnC_sort[[1]], dat$top_po_pairs$id2)
+dat$top_po_pairs %>%
+  filter(id2 %in% shared)
+```
+
+Oh my.  Those are the three individuals that looked like they could have been parents of that one contaminated
+sample (R031681 had super high internal heterozygosity).  The fact that some  these individuals that looked like
+they belonged in a big sibship also have high PO logl with this contaminated indiv is worrying.  It suggests 
+that maybe there is something going on with these particular individuals that is sprurious.
+
+## Make a colony data set
+
+```{r colony-create}
+dir.create("../colony_area/84-loci-siblike-group/")
+ckmr2colony(CKF = dat$kg_ckmr_markers, CKG = genos_for_colony)
+file.copy("Colony2.dat", "../colony_area/84-loci-siblike-group/")
+```
+
+
+Then I ran that on the command line.
+
+
+## Checking out the results
+
+I can slurp the inferred pedigree out as follows.  This gets it for all 96 loci at the
+moment, cuz it is still being run on the 84 loci...
+```{r get-ped}
+ped <- afblue::read_colony_best_config("../colony_area/siblike-group/output.BestConfig") %>%
+  filter(!is.na(mom))
+```
+
+If we want to get just the individuals that were in the original 19-member siblike group
+we filter it, and then we might as well arrange it to make it easier to see
+```{r filter-ped}
+ped %>%
+  filter(id %in% dat$CnC_sort[[1]]) %>%
+  arrange(dad, mom)
+```
+
+
+So, that makes it look like it is consistent with two half-sibships.  But that seems a little
+far-fetched to me.  Are we to expect that all these fish mated amongst themselves and 
+happened to have super high survival?  Maybe....In one way it would make sense if all the 
+fish in one little packet of ocean happened to do well, but I still don't like it.  
+
+It is suspicious to me that there are no full-sibships of size 3 or greater.  You can't exclude
+a sib group of size 2, so there is just very little information there.  
+
+
+### Let's look at the 84-locus result too
+
+```{r ped-84}
+ped84 <- afblue::read_colony_best_config("../colony_area/84-loci-siblike-group/output.BestConfig") %>%
+  filter(!is.na(mom))
+
+ped84 %>%
+  filter(id %in% dat$CnC_sort[[1]]) %>%
+  arrange(dad, mom)
+```
+Holy Cow! That is not what I was expecting to see.  Could it be that the homozygosity from the null alleles
+at 12 loci was what was really making these guys unsuitable as full sibs?  Or is this just
+a poor-mixing result from Colony?
+
+I think it is time for another visual inspection of the genotype graphs
+```{r geno-graphs}
+col_full_sib <- ped84$id[ped84$mom == "ma_1" & ped84$dad == "pa_1"]
+genos %>%
+  filter(id %in% col_full_sib) %>%
+  mutate(graph = ifelse(alle1<=alle2, paste(alle1, alle2, sep = "-"), paste(alle2, alle1, sep = "-"))) %>%
+  group_by(Locus, LocIdx, graph) %>%
+  tally()
+  
+```
+
+From that it is super clear that there is not way that is a proper full-sibling group, unless there is
+a boatload of genotyping error.  
+
+What do the read depths look like for these individuals?
+```{r look-at-read-depths}
+haplot <- readRDS("../extdata/processed/genos-aggregated-and-no-hi-missers.rds") 
+
+fs_read_depths <- haplot %>%
+  ungroup %>%
+  filter(NMFS_DNA_ID %in% col_full_sib) %>%
+  filter(locus %in% unique(genos$Locus)) %>%
+  arrange(locus, NMFS_DNA_ID, gene_copy) %>%
+  left_join(dat$kg_ckmr_markers %>% rename(locus = Locus, allele = Allele) %>% select(locus, LocIdx, allele, AlleIdx))
+  
+fs_read_depths
+```
+
+
+
