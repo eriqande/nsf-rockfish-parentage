@@ -32,12 +32,12 @@ obvious misassigmnments, so we use the GSI results for both adults and juvies.
 ```{r define-kelps}
 kelp_ad <- adult_species %>% 
   filter(species == "atrovirens",
-         score > 99.9) %>%
+         score > 99) %>%
   select(NMFS_DNA_ID) %>% unlist() %>% unname()
 
 kelp_juv <- juvie_species %>%
   filter(species == "atrovirens",
-         score > 99.9) %>%
+         score > 99) %>%
   select(NMFS_DNA_ID) %>% unlist() %>% unname
 
 ```
@@ -132,10 +132,22 @@ storage.mode(rocky_mat) <-  "integer"
 We can quickly look through rocky_mat for pairs of indivs with lots of matching genotypes.
 ```{r check-for-dupes}
 matchers <- pairwise_geno_id(S = rocky_mat, max_miss = 12) %>%
-  arrange(num_mismatch)
+  arrange(num_mismatch) %>%
+  mutate(NMFS_DNA_ID_1 = rownames(rocky_mat)[ind1],
+         NMFS_DNA_ID_2 = rownames(rocky_mat)[ind2])
 matchers
 ```
-We need to deal with these somehow.  I am going to say that anyone with 3 or fewer mismatches is certainly 
+We need to deal with these somehow.  But before we do that, I want to use these numbers to come up with
+a per-genotype discordance rate.  That should be pretty straightforward:
+```{r compute-discordance-rate}
+sum(matchers$num_mismatch) / sum(matchers$num_loc)
+
+```
+So, to repeat, the discordance rate across all these multiply-genotyped individuals is
+`r sum(matchers$num_mismatch) / sum(matchers$num_loc)`---roughly 3 in 1000.  That is a nice
+number.
+
+Now, to deal with these duplicates, here is what I will do: I am going to say that anyone with 3 or fewer mismatches is certainly 
 the same individual, and we are going to take just one from amongst those pairs/groups.  We use a hasty method:
 we toss out all the individuals that appear in both ind1 and ind2, and then all the remaining ind2's.  This 
 might throw out one more than we need to, but it is what we do for now.
@@ -161,7 +173,7 @@ juvie_mat <- rocky_mat_tossed[kelp_juv_kept, ]
 ```
 
 
-## Before doing the comparisons, compute at internal heterozygosities
+## Before doing the comparisons, compute internal heterozygosities
 
 We want to have these to make sure we don't have contaminated individauls.
 ```{r compute-int-hzs}
@@ -172,8 +184,7 @@ int_hz <- kg2 %>%
   group_by(NMFS_DNA_ID) %>% 
   summarise(num_loc = n(), num_hz = sum(hz), fract_hz = num_hz / num_loc)
 ```
-And now let us plot that and also put all the individuals (parents and offpring) that look likely
-above on it.
+And now let us plot that .
 ```{r plot-int-hz, fig.width=12}
 ggplot(int_hz, aes(x = fract_hz)) +
   geom_density(fill = "orange", alpha = 0.3)
@@ -226,7 +237,7 @@ It is clear that the internal heterozygosities are reasonable, so it is not like
 pairs are from contaminated individuals.
 
 Try plotting all those pairs, and compare them to the simulated values
-```{r plot-all-pairs-density, fig.width = 12}
+```{r plot-all-pairs-density, fig.width = 6}
 simlogls <- extract_logls(Q = Qs, numer = c(PO = 1), denom = c(U = 1))
 ggplot(result, aes(x = value)) +
   geom_density(colour = "red") +
@@ -493,6 +504,18 @@ saveRDS(output_list, file = "rds_outputs/kr-parentage-output-list.rds", compress
 
 ```
 
+
+## Look further at the siblings
+
+Let's plot the sib-logls against what we think they should be
+```{r  plot-sib-simlogls, fig.width=6}
+fs_u_simlogls <- extract_logls(Qs, numer = c(FS = 1), denom = c(U = 1))
+tmp_frame <- high_likely_fs %>%
+  mutate(y_line = 0.002)
+ggplot() +
+  geom_density(data = fs_u_simlogls %>% filter(true_relat == "FS"), mapping = aes(x = logl_ratio), fill = "green", alpha = 0.3) +
+  geom_point(data = tmp_frame, aes(x = value, y = y_line))
+```
 I still need to look at this stuff a little more.  There appears to be one duplicate in there, or something.  Namely `R014981` and `R014982`
 have a ridiculously high full sib likelihood.  And they are right next to each other in NMFS_ID.  So something is weird with them.
 
@@ -508,3 +531,186 @@ int_hz %>% filter(NMFS_DNA_ID %in% c("R014981", "R014982"))
 ```
 
 I should look at the actual read depths on these.  to confirm, but certainly the high fract_hz suggests something is going on.
+
+Let's do that. R014982 was s6851 on gtseq_run 32 (that info is in the processed genos data)
+```{r close-look-for-barcode-mixup}
+rd_look <- readRDS("../extdata/haplot-rds/gtseq32_96loci.rds") %>%
+  filter(id == "s6851")
+
+rd_look %>% arrange(locus, desc(depth))
+```
+
+At some of the loci it has high read depths for more than two alleles.  So, I'll bet that is what is going on there.
+
+There is another pair with a full-sib logl that is way higher than we would have expected, too.  
+
+Perhaps the LogL sims will shed more light on these.
+
+
+## LogL Sims for Each Individual
+
+Having found these apparent parent-offspring and full sibling pairs it is very, very 
+important to make sure that they are not just aberrant individuals (like non-target species, etc.).
+
+We can do this by using gsi_sim's logl-sims method.  We are going to throw all the kelp adults and juveniles
+into a baseline file for kelps, and then to baseline logl-sims on them and get the distribution of z-scores 
+for everyone.   So, we need to make that gsi_sim file that has everyone in it:
+```{r make-everyone-baseline}
+all_kelps_for_base <- kelp_idx_frame %>%
+  mutate(genostr = paste(`1`, `2`)) %>%
+  select(NMFS_DNA_ID, Locus, genostr) %>%
+  tidyr::spread(data = ., key = Locus, value = genostr)
+
+all_kelps_for_base[is.na(all_kelps_for_base)] <- "0 0"
+
+cat(nrow(all_kelps_for_base), ncol(all_kelps_for_base) - 1, "\n", file = "../gsi_area/all_kelps_baseline.txt")
+cat(names(all_kelps_for_base[-1]), sep = "\n", file = "../gsi_area/all_kelps_baseline.txt", append = TRUE)
+cat("POP all_kelps\n", file = "../gsi_area/all_kelps_baseline.txt", append = TRUE)
+write.table(all_kelps_for_base, row.names = F, col.names = F, quote = F, sep = "\t", file = "../gsi_area/all_kelps_baseline.txt", append = TRUE)
+```
+
+And then I do the logl-sims.  This is set to eval=FALSE 'cuz it takes a long time.
+```{sh compute-base-logl-sims}
+cd gsi_area
+~/Documents/git-repos/gsi_sim/gsi_sim-Darwin -b all_kelps_baseline.txt --self-assign  --base-logl-sims 1000 0 > logl_sims_stdout.txt
+```
+Then we can read in those logl-sims...
+```{r read-logl-sims}
+logl_sims <- read.table("../gsi_area/baseline_logl_summary.txt", header = TRUE, stringsAsFactors = FALSE) %>%
+  tbl_df()
+```
+and see what they look like.  So, let's just plot the ObsLogLs first:
+```{r plot-obs-logls, fig.width=5}
+ggplot(logl_sims, aes(x = ObsLogL)) +
+  geom_histogram(binwidth = 1, fill = "blue")
+```
+
+Clearly there are some individuals off in the tails there.  I suspect the one that is way too high
+is probably a contaminated sample.  The ones that are way too low might be different species, I would think.
+Let's look at the z-scores while we are at it:
+```{r plot-z-scores}
+ggplot(logl_sims, aes(x = zScore)) +
+  geom_histogram(binwidth = .1, fill = "blue")
+```
+
+
+Once again, clearly there are some that are way too low.  So what we need to do now is 
+check the ObsLogLs and the zScores for the pairs that we found.
+
+
+### Checking pairs against ObsLogL and zScore
+
+```{r put-z-scores-on-po-pairs}
+logl_sim_tmp_off <- logl_sims %>% 
+  select(-AssignedTo) %>%
+  rename(offspring = FishId, obslogl_off = ObsLogL, zscore_off = zScore, fsg_off = FractionSimmedGreater, num_loci_off = NumLoci)
+logl_sim_tmp_par <- logl_sims %>% 
+  select(-AssignedTo) %>%
+  rename(parent = FishId, obslogl_par = ObsLogL, zscore_par = zScore, fsg_par = FractionSimmedGreater, num_loci_par = NumLoci)
+po_pairs_with_base_logls <- good_pairs %>% 
+  left_join(logl_sim_tmp_off) %>%
+  left_join(logl_sim_tmp_par)
+po_pairs_with_base_logls
+```
+Those all look like reasonable values.  Now, lets look at the full-siblings
+```{r z-scores-on-fs-pairs}
+logl_sim_tmp_1 <- logl_sims %>% 
+  select(-AssignedTo) %>%
+  rename(name1 = FishId, obslogl1 = ObsLogL, zscore1 = zScore, fsg1 = FractionSimmedGreater, num_loci1 = NumLoci)
+logl_sim_tmp_2 <- logl_sims %>% 
+  select(-AssignedTo) %>%
+  rename(name2 = FishId, obslogl2 = ObsLogL, zscore2 = zScore, fsg2 = FractionSimmedGreater, num_loci2 = NumLoci)
+fs_pairs_with_base_logls <- high_likely_fs %>%
+  left_join(logl_sim_tmp_1) %>%
+  left_join(logl_sim_tmp_2)
+fs_pairs_with_base_logls
+```
+
+
+## Gotta look at our sampling intensities
+
+We need to have a look at when all these fish were sampled so that we can
+see whether the preponderance of same-year individuals is more than what
+we expect by chance.
+```{r meta-for-all-kelps}
+kept_kelp_meta <- meta %>%
+  filter(NMFS_DNA_ID %in% c(rownames(adult_mat), rownames(juvie_mat)))
+```
+
+Now, plot the samples obtained against day:
+```{r plot-sampling}
+kept_kelp_days <- kept_kelp_meta %>%
+  group_by(REPORTED_LIFE_STAGE, COLLECTION_DATE) %>%
+  tally()
+
+ggplot(kept_kelp_days, aes(x = COLLECTION_DATE, y = n)) +
+  geom_point() +
+  facet_wrap(~REPORTED_LIFE_STAGE, scales = "free_y")
+       
+```
+
+OK, let's summarize that all the way down to years:
+```{r plot-sampling-by-years}
+kept_kelp_years <- kept_kelp_meta %>%
+  mutate(year = lubridate::year(COLLECTION_DATE)) %>%
+  group_by(REPORTED_LIFE_STAGE, year) %>%
+  tally() %>% 
+  ungroup() %>%
+  filter(year >= 2013) %>%
+  rename(life_stage = REPORTED_LIFE_STAGE)
+
+ggplot(kept_kelp_years, aes(x = year, y = n, fill = life_stage)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~life_stage)
+  
+```
+
+
+Look at that.  So, if our method was totally broken and bogus and we were just
+getting a boatload of artifactual false positives, we would be expecting a lot
+more sib-pairs inferred between years.  But we don't.  Here is what we find
+amongst the juveniles:
+```{r count-juvie-pairs-years}
+high_likely_fs %>% 
+  filter(stage1 == "JUVENILE" & stage2 == "JUVENILE") %>%
+  mutate(year1 = lubridate::year(date1),
+         year2 = lubridate::year(date2)) %>%
+  group_by(year1, year2) %>% 
+  tally()
+```
+
+That is really interesting.  If siblings occurred at random within years, then the fraction of them
+we would expect from each year would depend on the number of pairs that we could form, and those
+numbers look like:
+```{r expected-num-pairs}
+kept_kelp_years %>%
+  filter(life_stage == "JUVENILE") %>%
+  mutate(num_pairs = n * (n - 1) / 2,
+         fract_pairs = num_pairs / sum(num_pairs))
+```
+So, there are significantly fewer pairs than expected at random in 2015, or, I should say, there is definitely a different
+distribution of sib-pairs in 2014 (lots) and 2015 (few).
+
+While we are at it, we could compute the expected fraction of between-years assignments if these
+things were all false positives (which they aren't, clearly). This is approximate, but pretty
+darn close.
+```{r expected-fractions}
+tmp <- kept_kelp_years %>%
+  filter(life_stage == "JUVENILE") 
+freq <- tmp$n / sum(tmp$n)
+names(freq) <- tmp$year
+tmp2 <- outer(freq, freq) * 2
+diag(tmp2) <- diag(tmp2) / 2
+tmp2[upper.tri(tmp2)] <- 0
+
+tmp2
+
+
+```
+So, the upshot there is that if our method was totally bogus and random and wrong,
+we would expect to have most between-year assignments.  Which we clearly don't.
+
+That is good!
+
+
+

@@ -146,6 +146,13 @@ juvie_ids <- meta_keep %>%
   mutate(group = paste(REPORTED_LIFE_STAGE, SPECIES, sep = "_")) %>%
   select(NMFS_DNA_ID, group) %>%
   arrange(group)
+
+# now, weird thing here is that this leads to duplicated IDs for the juveniles, 
+# and could also do so for the adults, but we
+# only want to pick it out once, so we have to condense them here
+juvie_ids <- juvie_ids %>%
+  group_by(NMFS_DNA_ID) %>%
+  summarise(group = "JUVENILE_atrovirens")
 ```
 
 Now we just need to grab those individauls out of the gsi_frame and make some gsi_sim files:
