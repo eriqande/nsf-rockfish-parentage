@@ -117,13 +117,23 @@ hist(tot_by_locus$ngenos, breaks = 30)
 
 Now, plot the homozygosities and color it according to whether there a likely nulls.  There are 10 loci we
 identified as likely having null alleles.
-```{r plot-it, fig.width = 6}
+```{r plot-it}
 tmp <- exp_and_obs %>%
   mutate(likely_has_nulls = Locus %in% nasty_loci)
 
 ggplot(tmp, aes(x = exp_homoz, y = obs_homoz, colour = likely_has_nulls)) +
   geom_abline(intercept = 0, slope = 1, linetype = "dotted") +
   geom_point()
+
+
+fortalk <- ggplot(tmp, aes(x = exp_homoz, y = obs_homoz, colour = likely_has_nulls)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted") +
+  xlab("Expected fraction of homozygotes") +
+  ylab("Observed fraction of homozygotes") +
+  guides(colour = FALSE)
+
+ggsave(fortalk, filename = "microhap_homozyg.pdf", width = 4, height = 3)
 
 ```
 
