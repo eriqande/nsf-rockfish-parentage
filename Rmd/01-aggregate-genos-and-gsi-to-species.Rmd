@@ -185,10 +185,10 @@ Then run gsi_sim on the command line.  This is set to not eval by default.
 ```{sh run-gsi-sim, eval=FALSE}
 # first we do the juvenile assignments
 cd gsi_area; 
-/Users/eriq/Documents/git-repos/gsi_sim/gsi_sim-Darwin -b adults.txt -t juvies.txt | awk -F";" 'BEGIN {print "NMFS_DNA_ID species score"} /GMA_FULL_EM_INDIVS_CSV:/ {print $1, $2, $3}' | sed 's/GMA_FULL_EM_INDIVS_CSV:\///g' > juvenile_rockfish_assignments.txt
+../bin/gsi_sim-Darwin -b adults.txt -t juvies.txt | awk -F";" 'BEGIN {print "NMFS_DNA_ID species score"} /GMA_FULL_EM_INDIVS_CSV:/ {print $1, $2, $3}' | sed 's/GMA_FULL_EM_INDIVS_CSV:\///g' > juvenile_rockfish_assignments.txt
 
 # then we do self-assignment to weed out any adults that are misidentified to species
-/Users/eriq/Documents/git-repos/gsi_sim/gsi_sim-Darwin -b adults.txt --self-assign | awk -F";" 'BEGIN {print "NMFS_DNA_ID species score"} /SELF_ASSIGN_A_LA_GC_CSV:/ {print $1, $2, $3}' | sed 's/SELF_ASSIGN_A_LA_GC_CSV:\///g;' > adult_rockfish_self_assignment.txt 
+../bin/gsi_sim-Darwin -b adults.txt --self-assign | awk -F";" 'BEGIN {print "NMFS_DNA_ID species score"} /SELF_ASSIGN_A_LA_GC_CSV:/ {print $1, $2, $3}' | sed 's/SELF_ASSIGN_A_LA_GC_CSV:\///g;' > adult_rockfish_self_assignment.txt 
 
 ```
 
