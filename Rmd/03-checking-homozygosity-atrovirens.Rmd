@@ -147,9 +147,12 @@ ggplot(tmp %>% filter(likely_has_nulls == FALSE), aes(x = exp_homoz, y = obs_hom
 
 That is way better than RAD data!
 
-And, finally, print out the data with the Z-scores:
+And, finally, print out the data with the Z-scores (in other words observed homo freq - expected homo freq 
+divided by the expected standard deviation)
 ```{r output-stuff}
-saveRDS(exp_and_obs, file = "rds_outputs/exp_and_obs_homozygosity.rds", compress = "xz")
+exp_and_obs %>% 
+  mutate(z_score = (obs_homoz - exp_homoz) / exp_SD) %>% 
+  saveRDS(., file = "rds_outputs/exp_and_obs_homozygosity.rds", compress = "xz")
 ```
 
 
