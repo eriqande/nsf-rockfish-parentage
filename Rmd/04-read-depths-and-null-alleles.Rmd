@@ -1,0 +1,499 @@
+---
+title: "Exploring Read Depths with Possible Null Alleles"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+---
+
+
+Look back at `03-checking-homozygosity-atrovirens.Rmd` and you will see ample evidence that some of the loci
+have null alleles.  What I want to do here is see if we can identify homozygotes that are likely carrying
+the null allele by their read depths.  A fish that is homozygous due to a null allele will have half as many
+reads as expected. Now, we just have to figure out what "expected" means there.
+
+## Initial Explorations
+
+Let's start by slurping in the results of `03-` and seeing which loci are the culprits.  
+```{r}
+library(tidyverse)
+library(stringr)
+exp_and_obs <- read_rds("rds_outputs/exp_and_obs_homozygosity.rds")
+```
+
+Now, see which loci are offenders by tallying up how for how many alleles they have a z_score over
+3.0, and also get the mean z-score (with z-score about 3.0) at those loci:
+```{r}
+zbgb <- exp_and_obs %>%
+  group_by(Locus) %>%
+  summarise(num_gt_3 = sum(z_score > 3.0, na.rm = TRUE),
+            mean_z = mean(z_score, na.rm = TRUE)) %>%
+  arrange(desc(mean_z))
+
+zbgb
+```
+
+That is interesting. There are clearly some big offenders.  Those are likely the ones with a high frequency of the null allele.
+
+We will explore some of those.
+
+## Read depths
+
+Diana provided me with the full filtered data that she is using now:
+```{r}
+ddata <- read_rds("../data/kelp_genos_used_long-full-filter.rds")
+```
+Oops, that didn't have read depths in it.  But I can get those from an earlier run through 
+all this for a quick look:
+```{r}
+genos <- readRDS("../extdata/processed/genos-aggregated-and-no-hi-missers.rds")
+```
+
+Now we want to keep data just the genotypes that Diana has included in her
+final data set, keeping in mind that the genotypes might be different given the
+fact that she filtered things a little differently.  But for high read depth stuff
+it should be close to identical...
+```{r}
+digenos <- semi_join(genos, ddata %>% select(NMFS_DNA_ID, Locus), 
+          by = c("NMFS_DNA_ID", "locus" = "Locus"))
+```
+
+With these in hand I thought it would be interesting to plot, for each locus, total read
+depth on the $y$-axis as a function of mean read depth in the individual on the $x$ axis, 
+coloring the points by whether it is a homozygote or a het.
+
+To do that we will want to squash our data down to total read depth:
+```{r}
+tot_depths <- digenos %>%
+  group_by(gtseq_run, NMFS_DNA_ID, locus) %>%
+  summarise(tot_depth = total_depth[1],
+            is_homozyg = allele[1] == allele[2])
+  
+```
+Now, let's get the average total depth for each individual on there.  We will carry gtseq_run 
+around with us too:
+```{r}
+tdm <- tot_depths %>%
+  group_by(gtseq_run, NMFS_DNA_ID) %>%
+  mutate(mean_ind_depth = mean(tot_depth, na.rm = TRUE)) %>%
+  ungroup()
+
+# then make a clean set for use:
+tdmc <- tdm %>%
+  semi_join(zbgb %>% slice(1:9), by = c("locus" = "Locus")) %>%
+  filter(!is.na(tot_depth))
+```
+
+OK, now finally, let's plot a 3 x 3 with the first 9 loci in zbgb that seem to have
+null allele issues.
+```{r}
+g <- ggplot(tdmc, aes(x = mean_ind_depth, y = tot_depth, colour = is_homozyg)) +
+  geom_point(alpha = 0.03) +
+  facet_grid(locus ~ is_homozyg, scales = "free")
+
+ggsave(g, filename = "pdf_outputs/9_locus_smear.pdf", width = 6, height = 25)
+```
+
+From that, there is clearly 1 locus with a pattern that looks like half of all homozygotes are called
+with half the read depth of the rest.
+
+What if we look at the density of reads amongst hets and homozygotes?
+```{r}
+loc_nums <- tdmc %>% 
+  group_by(locus) %>% 
+  summarise(loc_mean_depth = mean(tot_depth, na.rm = TRUE), num_het = sum(!is_homozyg, na.rm = TRUE), num_hom = sum(is_homozyg, na.rm = TRUE)) %>%
+  mutate(txt_loc_mean_depth = sprintf("locus mean depth: %d", floor(loc_mean_depth)),
+         txt_num_het = paste0("num hets: ", num_het),
+         txt_num_hom = paste0("num homo: ", num_hom))
+
+g2 <- tdmc %>% 
+  mutate(sc_depth = tot_depth / mean_ind_depth) %>%
+  ggplot(., aes(x = sc_depth, colour = is_homozyg)) +
+  geom_density() +
+  facet_wrap(~ locus, ncol = 3) +
+  geom_text(data = loc_nums, aes(label = txt_loc_mean_depth), x = 3, y = 4, colour = "black", hjust = 0) +
+  geom_text(data = loc_nums, aes(label = txt_num_het), x = 3, y = 3.5, colour = "black", hjust = 0) +
+  geom_text(data = loc_nums, aes(label = txt_num_hom), x = 3, y = 3, colour = "black", hjust = 0) 
+
+ggsave(g2, filename = "pdf_outputs/9_locus_density.pdf", width = 18, height = 18)
+```
+
+## Two sample KS-test for total read depth between Hom and Het
+
+Let's see if we can do this elegantly and simply within the dplyr framework:
+```{r}
+ks_tests <- tdm %>%
+  filter(!is.na(is_homozyg)) %>%
+  group_by(locus) %>%
+  summarise(ks_p_value =  {
+    x <- tot_depth[is_homozyg == TRUE]
+    y <- tot_depth[is_homozyg == FALSE]
+    if (sum(!is.na(x)) > 30 && sum(!is.na(y))) {
+      ret <- suppressWarnings(ks.test(x,y))$p.value
+    } else {
+      ret <- NA
+    }
+    ret
+  }) %>%
+  arrange(ks_p_value)
+```
+
+Let's see if we can plot things as an ecdf.  That might make it easier to see some trends on the low end.  Let's just go big
+and do all the loci. Let us sort them from best to worst in terms of the ks.test.
+
+Something that would be kind of neat would be to start all those off having filtered
+out all values of total depth less than, say, the 20% quantile, so see if the
+distortions we see are really only due to the super low end of read depth.
+```{r}
+tmp <- tdm %>%
+  mutate(locus = factor(locus, levels = rev(ks_tests$locus)))
+
+top60 <- tmp %>%
+  group_by(locus) %>%
+  filter(tot_depth >= quantile(tot_depth, probs = 0.4, na.rm = TRUE))
+
+g3 <- ggplot(tmp, aes(x = tot_depth, colour = is_homozyg)) +
+  stat_ecdf(geom = "step") +
+  stat_ecdf(data = top60, geom = "step", linetype = "dashed") +
+  facet_wrap(~ locus, ncol = 8, scales = "free_x")
+
+ggsave(g3, filename = "pdf_outputs/all_locus_edcfs.pdf", width = 30, height = 40)
+```
+
+That is super worth looking at.  
+
+
+
+
+Now, I need to repeat all of this using the new filtering that Diana has done.
+
+## Doing the same with the differently filtered stuff from Diana
+
+```{r}
+ffgenos <- read_rds("../data/diana-filtered-ab_0.4-trd_20/genos-aggregated-and-no-hi-missers-full-filter.rds")
+juvie_species <- read_rds("../data/diana-filtered-ab_0.4-trd_20/juvie-gsi-sim-assignments-full-filter.rds")   # gsi assignments of juvenile fish
+adult_species <- read_rds("../data/diana-filtered-ab_0.4-trd_20/adult-gsi-sim-self-assignments-full-filter.rds")   # gsi self-assignments of adult fish
+
+# retain only the ones GSI-identified to kelp
+ff_kelp <- list(juvenile = juvie_species, adult = adult_species) %>%
+  bind_rows(.id = "life_stage") %>%
+  filter(species == "atrovirens", score > 0.99) %>%
+  left_join(., ffgenos, by = "NMFS_DNA_ID")
+
+# OK, now ff_kelp has all the data we need, but we are going to want to summarize
+# it a little bit to just a single row per genotype, and just say whether it is
+# a heterozygote or not:
+ff_tdm <- ff_kelp %>%
+  group_by(gtseq_run, NMFS_DNA_ID, locus) %>%
+  summarise(tot_depth = total_depth[1],
+            is_homozyg = allele[1] == allele[2]) %>%
+  ungroup()
+
+```
+
+And now we can do the ks tests on them all:
+```{r}
+ff_ks_tests <- ff_tdm %>%
+  filter(!is.na(is_homozyg)) %>%
+  group_by(locus) %>%
+  summarise(ks_p_value =  {
+    x <- tot_depth[is_homozyg == TRUE]
+    y <- tot_depth[is_homozyg == FALSE]
+    if (sum(!is.na(x)) > 30 && sum(!is.na(y))) {
+      ret <- suppressWarnings(ks.test(x,y))$p.value
+    } else {
+      ret <- NA
+    }
+    ret
+  }) %>%
+  arrange(ks_p_value)
+ff_ks_tests
+```
+
+And plot them:
+```{r}
+tmp <- ff_tdm %>%
+  mutate(locus = factor(locus, levels = rev(ff_ks_tests$locus)))
+
+top60 <- tmp %>%
+  group_by(locus) %>%
+  filter(tot_depth >= quantile(tot_depth, probs = 0.4, na.rm = TRUE))
+
+g3 <- ggplot(tmp, aes(x = tot_depth, colour = is_homozyg)) +
+  stat_ecdf(geom = "step") +
+  stat_ecdf(data = top60, geom = "step", linetype = "dashed") +
+  facet_wrap(~ locus, ncol = 8, scales = "free_x")
+
+ggsave(g3, filename = "pdf_outputs/all_locus_edcfs-ab_0.40-trd_20.pdf", width = 30, height = 40)
+
+```
+
+That looks pretty similar.  Oddly, the ks-tests are even more significant.
+
+## What does this mean in terms of genotyping error?
+
+I am going to try to do a simple thing to get a sense for what sort of genotyping error
+rates are implied by these patterns (under all sorts of assumptions).  For that we make
+a simple model.
+
+### A simple model
+
+Let's assume that the read depth distribution $x$ for heterozygotes and homozygotes should
+be the same. Call it $d(x)$.  Now, at a locus assume that we have $n^{o}$ homozygotes and 
+$n^{(e)}$ heterozygotes across all the indivdiuals and across all the total read depths.  Now,
+consider a total read depth interval $i$ that includes tot read depths $[x_i^\mathrm{lo}, x_i^\mathrm{hi}]$.
+Let there be $n_i$ individuals with total read depths in that interval. 
+
+Clearly, if the distribution of total read depths is identical for homozygotes and heterozygotes,
+and these things were independent, etc., then the distribution of $Y_i$---the number of homozygotes
+in the interval $i$---would be:
+$$
+Y_i \sim \mathrm{Binomial}\biggl(n_i, \frac{n^{o}}{n^{o} + n^{e}}\biggr)
+$$
+
+Of course, especially at some loci, we see that there is a discrepancy such that we might end
+up with more homozygotes (or even, in some cases, more heterozygotes) than we would expect
+in some intervals.  
+
+So, what we are going to do is assume a super simple model.  At each locus we will
+consider a strange little parameter:  $m$ is the genotype miscall rate.  If $m$ is positive
+it is defined as the 
+rate at which heterozygotes are incorrectly called as homozygotes. If $m$ is negative, its 
+absolute value is interpreted as the rate at which homozygotes are incorrectly called
+as heterozygotes. We define this in such a manner because it will make it easier to 
+assess the effect of small sample size and, with luck, it will give us a parameter that
+might have expectation 0 for cases where there is no genotyping error (that would not occur
+for a parameter that was constrained to be strictly greater than 0).  Under our new model with 
+this parameter $m$ we have:
+$$
+Y_i \sim \mathrm{Binomial}\biggl[n_i, \mathbb{I}(m\geq 0)\biggl(\frac{n^{o}}{n^{o} + n^{e}} + \frac{mn^{e}}{n^{o} + n^{e}}\biggr) + 
+\mathbb{I}(m<0)\biggl(\frac{(1+m)n^{o}}{n^{o} + n^{e}} \biggr)
+\biggr]
+$$
+Now, for each locus we will know $n^{o}$ and $n^{e}$, and for any interval $i$ we will know $n_i$, so we
+can compute the probability of the data given any value of $m$ pretty easily.  Accordingly, we
+can simply assume a uniform prior for $m$ from -1 to 1 and then compute its posterior for
+each interval.
+
+Note that this is pretty darn weird since the posterior is not symmetrical around 0, and the
+way that I am doing this pretty much assumes that any locus is just as likely to homozygote
+deficits and homozygote excesses, *a priori*.  But it is mostly just a way to visualize things...
+
+Let's write a function to do that
+```{r}
+m_est_func <- function(yi, ni, ne, no, m = seq(-0.5, 0.5, by = 0.001)) {
+  ofrac <- no / (ne + no)
+  efrac <- ne / (ne + no)
+  
+  p <- (m >= 0) * (ofrac + m * efrac) + (m < 0) * (1 + m) * ofrac
+  
+  likes <- dbinom(yi, ni, p)
+  posts <- likes / sum(likes)
+  tibble(m_rate = m, posterior = posts) %>%
+    filter(posterior > 1e-05)  # don't return values that have super low prob.
+}
+```
+
+Now, what we would like to do is chop up the total read depth into a lot of different
+bins.  It would probably be best to keep around 200 individuals in each bin, so that would be 30
+bins for each one.
+
+So, let's do that with a massive dplyr do.
+```{r}
+# first, break em up into intervals and compute no and ne, etc
+interv_inputs <- ff_tdm %>%
+  filter(!is.na(tot_depth), !is.na(is_homozyg)) %>%
+  group_by(locus) %>%
+  mutate(interval = as.character(cut_number(tot_depth, n = 30))) %>%
+  mutate(no = sum(is_homozyg),
+         ne = sum(!is_homozyg)) %>%
+  group_by(locus, interval) %>%  # then summarise things by intervals
+  summarise(mean_depth = mean(tot_depth),   # mean read depth in the interval
+            yi = sum(is_homozyg),  # number of homozygotes
+            ni = n(),  # total number of indivs in the interval
+            no = no[1],
+            ne = ne[1]) %>%
+  ungroup() %>%
+  mutate(interval_p_homo = yi / ni,
+         overall_p_homo = no / (no + ne))
+```
+
+Those things are not inputs to the function that I just wrote. So, now a little
+dplyr::do() action will get us what we want.  We want to be able to compute the 
+freq of hets so we will want to keep no and ne in there.  Also the total number in each
+interval, etc.
+```{r}
+m_ests <- interv_inputs %>%
+  group_by(locus, interval, mean_depth, ne, no, ni, yi) %>%
+  dplyr::do(m_est_func(yi = .$yi, ni = .$ni, ne = .$ne, no = .$no))
+```
+
+Then we can plot all of those:
+```{r}
+library(viridis)
+tmp_ests_tib <- m_ests %>%
+  ungroup() %>%
+  mutate(locus = factor(locus, levels = rev(ff_ks_tests$locus)))
+
+g4 <- ggplot(tmp_ests_tib, aes(x = m_rate, y = posterior, colour = mean_depth, group = mean_depth)) + 
+  geom_line() + 
+  facet_wrap(~ locus, ncol = 8, scales = "free_y") + 
+  scale_colour_viridis()
+
+ggsave(g4, filename = "pdf_outputs/all_locus_m_ests-ab_0.40-trd_20.pdf", width = 30, height = 40)
+```
+
+That is interesting...  Let's take a closer look at each of these by making a separate page
+for each one. That will allow the colour scale to vary and it will be a little more informative.
+In fact, we can reestablish the actual intervals there and color them discretely (but not discreetly...).
+```{r}
+dd <- "pdf_outputs/m_ests-ab_0.40-trd_20_by_locus"
+dir.create(dd)
+ests_list <- split(tmp_ests_tib, tmp_ests_tib$locus)
+for (i in seq_along(names(ests_list))) {
+  n <- names(ests_list)[i]
+  levs <- unique(ests_list[[n]]$interval[order(ests_list[[n]]$mean_depth)])
+  ptmp <- ests_list[[n]] %>% 
+    mutate(interval = factor(interval, levels = levs))
+  
+  freq <- tibble(x = 0, y = 1.01 * max(ptmp$posterior), label = paste0("p_hom = ", sprintf("%.3f", ptmp$no[1] / (ptmp$no[1] + ptmp$ne[1]))))
+  g_tmp <- ggplot(ptmp, aes(x = m_rate, y = posterior)) + 
+    geom_line(aes(colour = interval)) +
+    scale_colour_manual(values = rainbow(n = length(levs), end = 0.8)) +
+    geom_text(data = freq, aes(x = x, y = y, label = label))
+  
+  ggsave(g_tmp, filename = paste0(dd, "/", sprintf("%02d", i), "--", n, ".pdf"))
+}
+```
+
+That provides a nice way of looking at this.
+
+## Simpler Visualization: Homozygote Freqs in Read Depth Intervals
+
+So, I went through a lot of fluffy stuff there to try to estimate 
+the effects of things in terms of genotyping miscall rates.  However,
+it is probably going to be just as interesting to simply plot the freqeuncy
+of homozygotes in different intervals as a function of the read depth in those intervals.  Let's just go ahead
+and do that, since I think it should show some interesting patterns.
+
+I am going to want to know what the interval endpoints are, so we are going to need to parse those.
+Let's make a function for that:
+```{r}
+int_parse <- function(int, hilo) {
+  ret <- str_replace_all(int, "[^.0-9+e,]", "") %>%
+    str_split_fixed(., ",", 2)
+  if (hilo == "lo")
+    return(as.numeric(ret[,1]))
+  else 
+    return(as.numeric(ret[,2]))
+}
+```
+Now, go for it:
+```{r}
+lltmp <- interv_inputs %>%
+  mutate(lo_int = int_parse(interval, "lo"),
+         hi_int = int_parse(interval, "hi")) %>%
+  mutate(locus = factor(locus, levels = rev(ff_ks_tests$locus))) %>% 
+  arrange(locus, mean_depth)
+
+g5 <- ggplot(lltmp) +
+  geom_hline(aes(yintercept = overall_p_homo)) + 
+  geom_point(aes(x = mean_depth, y = interval_p_homo), colour = "blue") +
+  geom_smooth(aes(x = mean_depth, y = interval_p_homo), colour = "yellow") +
+  facet_wrap(~ locus, ncol = 8, scales = "free")
+
+ggsave(g5, filename = "pdf_outputs/all_locus_homo_freq_lines-ab_0.4-trd_20.pdf", width = 30, height = 40)
+  
+```
+
+That shows pretty compelling trends in the last 16 loci or so.
+
+
+## For completeness, expected vs observed homozygote freqs
+
+I am going to hand this off to Neil.  One thing we should routinely do
+with microhaps is assess expected vs observed homozygote freqs to see if there
+are any obvious distortions within samples that are all from the same
+population and which should have no such distortions from HWE).
+
+We really should wrap up a function that can take a data frame like ff_kelp
+that has columns like it has (I think it is standard microhaplot output) and
+compute the genotype freqs (observed and expected) and maybe a z-score.
+
+Let's start that now.  Maybe we can add it to microhaplot later.
+
+```{r}
+#' compute expected and observed frequencies of homozygote genotypes
+#' @param df a tibble of genotype information....more about its format later.
+#' It should look like ff_kelp
+#' @note I have not namespace addressed the tidyverse functions in here
+microhap_homoz_exp_obs <- function(df) {
+  
+  # first, filter out NAs (this assumes that each gene copy is NA if one of them is)
+  df2 <- df %>%
+    filter(!is.na(allele))
+  
+  # then, compute allele freqs and the homozyogte geno freqs at the different loci
+  afreqs <- df2 %>%
+    count(locus, allele) %>%
+    group_by(locus) %>%
+    mutate(allele_freq = n / sum(n),
+           exp_homo_freq = allele_freq ^ 2)
+  
+  # now count up the number of homozyogotes of each allele 
+  # and compute their frequencies. First we just get all the 
+  # homoz and het geno freqs:
+  gfreqs <- df2 %>%
+    group_by(id, locus) %>% 
+    mutate(is_homozyg = allele[1] == allele[2]) %>%
+    summarise(allele = allele[1], is_homozyg = is_homozyg[1]) %>% 
+    group_by(locus, allele, is_homozyg) %>% 
+    tally() %>% 
+    group_by(locus) %>% 
+    mutate(gfreq = n / sum(n))
+  
+  # now we need to get the total number of individuals genotyped, and then 
+  # get just the homozygous genotype freqs
+  hom_freqs <- gfreqs %>%
+    group_by(locus) %>%
+    mutate(tot_n = sum(n)) %>%
+    filter(is_homozyg == TRUE) %>%
+    rename(obs_homo_freq = gfreq) %>%
+    select(-is_homozyg, -n) %>%
+    ungroup()
+  
+  # now join that with afreqs and make NAs for obs_homo_freq 0
+  # and fill the tot_n around as need be. And compute a z-score
+  ret <- left_join(afreqs, hom_freqs, by = c("locus", "allele")) %>%
+    mutate(obs_homo_freq = ifelse(is.na(obs_homo_freq), 0, obs_homo_freq)) %>%
+    group_by(locus) %>%
+    mutate(tot_n = mean(tot_n, na.rm = TRUE)) %>%
+    mutate(z_score = (obs_homo_freq - exp_homo_freq) / sqrt(exp_homo_freq * (1 - exp_homo_freq) / tot_n)) %>%
+    ungroup()
+  
+  ret
+    
+}
+```
+
+
+Now we can use it:
+```{r}
+homoz <- microhap_homoz_exp_obs(ff_kelp)
+```
+Here is what that looks like:
+```{r}
+homoz
+```
+Then, if you wanted to plot the freqs of all the observed alleles you can do:
+```{r}
+library(viridis)
+homoz %>%
+  mutate(z_gt_3 = z_score > 3.0) %>%
+  ggplot(., aes(x = exp_homo_freq, y = obs_homo_freq, colour = z_gt_3)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  geom_point()
+```
+
+And it is pretty easy to look through homoz and figure out which loci have those offending homozygotes.
+

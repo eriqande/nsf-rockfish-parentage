@@ -95,6 +95,14 @@ mc_sample_simple(Qs, nu = "PO", de = c("U", "FS"), tr = c("U", "FS"), method = "
 ```
 We can come back to that later to see about finding Full Sibs.
 
+
+### Looking at parent offspring larger distributions
+I want to see what it looks like with more MC reps and looking at more parts of the disribution
+```{r sim-more}
+Qs2 <- simulate_Qij(C = CK, froms = c("PO", "U"), tos = c("PO", "U"), reps = 8e06)
+```
+
+
 ## Making genotype matrices
 ```{r}
 kelp_haps <- kelp_genos %>%
